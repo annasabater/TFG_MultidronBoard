@@ -181,52 +181,18 @@ def haversine(lat1, lon1, lat2, lon2):
 
     return distance
 
-# procesado de los datos de telemetría
-def processTelemetryInfo (id, telemetry_info):
-    global dronIcons, colors, traces, lock
-    # recupero la posición en la que está el dron
-    lat = telemetry_info['lat']
-    lon = telemetry_info['lon']
-    alt = telemetry_info['alt']
-    modo = telemetry_info['flightMode']
+import threading
 
-    # si es el primer paquete de este dron entonces ponemos en el mapa el icono de ese dron
-    if not dronIcons[id]:
-        dronIcons[id] = map_widget.set_marker(lat, lon,
-                        icon=dronPictures[id],icon_anchor="center")
-    # si no es el primer paquete entonces muevo el icono a la nueva posición
-    else:
-        dronIcons[id].set_position(lat,lon)
-    # actrualizo la altitud
-    altitudes[id]['text'] = str (round(alt,2))
-    modos[id]['text'] = modo
+lock = threading.Lock()
 
-    # dejo rastro si debo hacerlo y guardo el marcador en la lista correspondiente al dron,
-    # para luego poder borrarlo si así lo pide el jugador. También necesitare la posición del marcador
-    if drawingAction[id] == 'startDrawing':
-        traces[id].append({'pos': (lat, lon), 'marker': None})
-        drawingAction[id] = 'draw'
-    elif drawingAction[id] == 'draw':
-            last = len(traces[id]) -1
-            if last >= 0:
-                coords = traces[id][last]['pos']
 
-                marker = map_widget.set_path([(lat, lon), coords], color=colors[id], width=6)
-                traces[id].append({'pos': (lat,lon), 'marker': marker})
-    elif drawingAction [id] == 'remove':
-        for item in traces[id]:
-            # elimino de la lista de trazas todas las que están a menos de un metro de la posición del dron
-            center = item['pos']
-            if haversine (center[0], center[1], lat, lon) < 1:
-                traces[id].remove(item)
-                # la primera traza no tiene marker, asi que no puedo borrar la linea
-                if  item['marker'] != None:
-                    item['marker'].delete()
 
 
 ########## Funciones para la creación de multi escenarios #################################
 
 def createBtnClick ():
+    global mode_selected
+    mode_selected = True
     global scenario
     scenario = []
     # limpiamos el mapa de los elementos que tenga
@@ -280,9 +246,17 @@ def defineCircle(type):
     messagebox.showinfo("showinfo",
                         "Con el boton izquierdo señala el centro\nCon el boton derecho marca el límite del círculo")
 
+mode_selected = False  # Indica si ya se ha seleccionado una opción Crear
+
 # capturamos el siguiente click del mouse
 def getFenceWaypoint (coords):
     global marker, centerFixed
+    global mode_selected
+
+    # Evita que aparezca el error si aun no se ha seleccionado Crear
+    if not mode_selected:
+        return  # No hace nada si no hay un modo seleccionado
+
     # acabo de clicar con el botón izquierdo
     if fence:
         # hay un fence en marcha
@@ -331,6 +305,7 @@ def getFenceWaypoint (coords):
     else:
         messagebox.showinfo("error",
                             "No hay ningun fence en construccion\nIndica primero qué tipo de fence quieres")
+
 
 # cerramos el fence
 def closeFence(coords):
@@ -437,9 +412,6 @@ def getCircle ( lat, lon, radius):
         points.append((lat2, lon2))
     return points
 
-
-
-
 ############################ Funciones para seleccionar multi escenario ##########################################
 def selectBtnClick ():
     global scenarios, current, polys
@@ -542,6 +514,7 @@ def showNext ():
     else:
         nextBtn['state'] = tk.NORMAL
 
+'''
 # Limpiamos el mapa
 def clear ():
     global paths, fence, polys
@@ -553,6 +526,25 @@ def clear ():
 
     paths = []
     polys = []
+'''
+def clear():
+    global paths, polys, fence, numPlayers
+    name.set("")
+    for path in paths:
+        path.delete()
+    for poly in polys:
+        poly.delete()
+
+    paths, polys, fence = [], [], None
+    numPlayers = 0
+
+    # Restaurar la pantalla de selección de jugadores
+    for widget in selectPlayersFrame.winfo_children():
+        widget.destroy()
+
+    tk.Label(selectPlayersFrame, text='Selecciona el número de jugadores').grid(row=0, column=0, columnspan=4, padx=5, pady=5)
+    for i in range(1, 5):
+        tk.Button(selectPlayersFrame, text=str(i), bg="dark orange", command=lambda n=i: selectNumPlayers(n)).grid(row=1, column=i-1, padx=5, pady=5)
 
 # borramos el escenario que esta a la vista
 def deleteScenario ():
@@ -687,7 +679,7 @@ def loadScenario ():
     else:
         messagebox.showinfo("showinfo",
                         "No hay ningún escenario cargado en el dron")
-
+''''''
 # preparo los botones para crear el escenario de cada jugador
 def createPlayer (color):
     # aqui vamos a crear el escenario para uno de los jugadores, el que tiene el color indicado como parámetro
@@ -758,6 +750,26 @@ def selectNumPlayers (num):
         'scenarios': []     # un escenario para cada jugador
     }
     # colocamos los botones que permiten crear el escenario para cada uno de los jugadores
+
+    # Eliminar botones anteriores
+    for widget in selectPlayersFrame.winfo_children():
+        if isinstance(widget, tk.Button) and "Crea el escenario" in widget.cget("text"):
+            widget.destroy()
+
+    buttons = []
+    colors = [('red', 'rojo'), ('blue', 'azul'), ('green', 'verde'), ('yellow', 'amarillo')]
+
+    #Actualiza los botones de la cantidad de numero de jugadores en Crear
+    for i in range(num):
+        color, label = colors[i]
+        btn = tk.Button(selectPlayersFrame, text=f"Crea el escenario para el jugador {label}", bg=color, fg='white',
+                        command=lambda c=color: createPlayer(c))
+        btn.grid(row=2 + i, column=0, columnspan=4, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
+        buttons.append(btn)
+
+    redPlayerBtn, bluePlayerBtn, greenPlayerBtn, yellowPlayerBtn = (buttons + [None] * (4 - num))
+    
+'''
     if num == 1:
         redPlayerBtn = tk.Button(selectPlayersFrame, text="Crea el escenario para el jugador rojo", bg="red", fg = 'white',
                                  command=lambda: createPlayer('red'))
@@ -802,6 +814,7 @@ def selectNumPlayers (num):
         yellowPlayerBtn = tk.Button(selectPlayersFrame, text="Crea el escenario para el jugador amarillo", bg="yellow", fg='black',
                                 command = lambda: createPlayer('yellow'))
         yellowPlayerBtn.grid(row=5, column=0,columnspan = 4,  padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
+'''
 
 # me contecto a los drones del enjambre
 def connect ():
@@ -896,7 +909,6 @@ def removeAll (id):
 ################### Funciones para supervisar el multi escenario #########################
 
 def superviseBtnClick ():
-
     # quitamos los otros dos frames
     selectFrame.grid_forget()
     createFrame.grid_forget()
@@ -1071,7 +1083,7 @@ def crear_ventana():
     global QRimg
     global colors
     global lock
-    global telemetriaFrame, controlesFrame
+    global telemetriaFrame, controlesFrame, controlFrame, mapaFrame
     playersCount = 0
 
     connected = False
@@ -1088,14 +1100,15 @@ def crear_ventana():
 
     ventana = tk.Tk()
     ventana.title("Gestión de escenarios")
-    ventana.geometry ('1900x1000')
+    ventana.geometry ('2400x1200')
 
     # El panel principal tiene una fila y dos columnas
     ventana.rowconfigure(0, weight=1)
     ventana.columnconfigure(0, weight=1)
     ventana.columnconfigure(1, weight=1)
 
-    controlFrame = tk.LabelFrame(ventana, text = 'Control')
+    #controlFrame = tk.LabelFrame(ventana, text = 'Control')
+    controlFrame = tk.LabelFrame(ventana, text='Control', font=("Arial", 10, "bold"))
     controlFrame.grid(row=0, column=0, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
     # El frame de control aparece en la primera columna
     controlFrame.rowconfigure(0, weight=1)
@@ -1114,7 +1127,7 @@ def crear_ventana():
     superviseBtn.grid(row=0, column=2,  padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
 
     ################################# frame para crear escenario  ###################################################
-    createFrame = tk.LabelFrame(controlFrame, text='Crear escenario')
+    createFrame = tk.LabelFrame(controlFrame, text='Crear escenario', font=("Arial", 8, "bold"))
     # la visualización del frame se hace cuando se clica el botón de crear
     #createFrame.grid(row=1, column=0,  columnspan=3, padx=5, pady=5, sticky=tk.N + tk.S + tk.E + tk.W)
     createFrame.rowconfigure(0, weight=1)
@@ -1136,7 +1149,7 @@ def crear_ventana():
     tk.Entry(createFrame, textvariable=name)\
         .grid(row=1, column=0, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
 
-    selectPlayersFrame = tk.LabelFrame(createFrame, text='Jugadores')
+    selectPlayersFrame = tk.LabelFrame(createFrame, text='Jugadores', font=("Arial", 8, "bold"))
     selectPlayersFrame.grid(row=2, column=0, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
     selectPlayersFrame.rowconfigure(0, weight=1)
     selectPlayersFrame.rowconfigure(1, weight=1)
@@ -1193,7 +1206,8 @@ def crear_ventana():
     clearBtn.grid(row=6, column=0, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
 
     ################################ frame para seleccionar escenarios ############################################
-    selectFrame = tk.LabelFrame(controlFrame, text='Selecciona escenario')
+    selectFrame = tk.LabelFrame(controlFrame, text='Selecciona escenario', font=("Arial", 8, "bold"))
+
     # la visualización del frame se hace cuando se clica el botón de seleccionar
     #selectFrame.grid(row=1, column=0,  columnspan=2, padx=5, pady=5, sticky=tk.N + tk.S + tk.E + tk.W)
 
@@ -1274,7 +1288,7 @@ def crear_ventana():
     deleteBtn.grid(row=7, column=0, columnspan = 4, padx=5, pady=5, sticky=tk.N +  tk.E + tk.W)
 
     ########################## frame para supervisar ####################################################
-    superviseFrame = tk.LabelFrame(controlFrame, text='Supervisar vuelos')
+    superviseFrame = tk.LabelFrame(controlFrame, text='Supervisar vuelos', font=("Arial", 8, "bold"))
     # la visualización del frame se hace cuando se clica el botón de supervisar
     # superviseFrame.grid(row=1, column=0,  columnspan=3, padx=5, pady=5, sticky=tk.N + tk.S + tk.E + tk.W)
 
@@ -1288,6 +1302,12 @@ def crear_ventana():
     superviseFrame.columnconfigure(1, weight=1)
     superviseFrame.columnconfigure(2, weight=1)
     superviseFrame.columnconfigure(3, weight=1)
+
+    plotBtn = tk.Button(superviseFrame, text="Generar Informe Visual", bg="dark orange", command=plotFlightReport)
+    plotBtn.grid(row=6, column=0, columnspan=4, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
+
+    timeBtn = tk.Button(superviseFrame, text="Ver Distacia de Vuelo", bg="dark orange", command=showFlightDistances)
+    timeBtn.grid(row=5, column=0, columnspan=4, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
 
     parametersBtn = tk.Button(superviseFrame, text="Ajustar parámetros", bg="dark orange", command=adjustParameters)
     parametersBtn.grid(row=0, column=0, columnspan=4, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
@@ -1308,6 +1328,7 @@ def crear_ventana():
     # las colocaremos cuando sepamos cuántos drones tenemos en el enjambre
     telemetriaFrame = tk.LabelFrame(superviseFrame, text='Telemetría (altitud y modo de vuelo')
     telemetriaFrame.grid(row=2, column=0, columnspan=4, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
+
     telemetriaFrame.rowconfigure(0, weight=1)
     telemetriaFrame.rowconfigure(1, weight=1)
     telemetriaFrame.columnconfigure(0, weight=1)
@@ -1319,7 +1340,9 @@ def crear_ventana():
     showQRBtn.grid(row=3, column=0, columnspan=4, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
 
     #################### Frame para el mapa, en la columna de la derecha #####################
-    mapaFrame = tk.LabelFrame(ventana, text='Mapa')
+    #mapaFrame = tk.LabelFrame(ventana, text='Mapa')
+    mapaFrame = tk.LabelFrame(ventana, text='Mapa', font=("Arial", 10, "bold"))
+
     mapaFrame.grid(row=0, column=1, padx=5, pady=5, sticky=tk.N + tk.S + tk.E + tk.W)
     mapaFrame.rowconfigure(0, weight=1)
     mapaFrame.rowconfigure(1, weight=1)
@@ -1402,6 +1425,148 @@ def crear_ventana():
     lock = threading.Lock()'''
 
     return ventana
+import csv
+
+import time
+import threading
+
+flight_times = [0, 0, 0, 0]
+start_times = [None, None, None, None]
+flight_times_lock = threading.Lock()
+
+def startFlightTimer(drone_id):
+    global start_times, flight_times_lock
+    with flight_times_lock:
+        start_times[drone_id] = time.time()
+
+def stopFlightTimer(drone_id):
+    global flight_times, start_times, flight_times_lock
+    with flight_times_lock:
+        if start_times[drone_id]:
+            flight_times[drone_id] += time.time() - start_times[drone_id]
+            start_times[drone_id] = None
+
+
+import geopy.distance
+
+import geopy.distance
+from math import radians, sin, cos, sqrt, atan2
+
+import geopy.distance
+from math import radians, sin, cos, sqrt, atan2
+
+
+def haversine_distance(coord1, coord2):
+
+    #Calcula la distancia en metros entre dos coordenadas GPS usando la fórmula de Haversine.
+    lat1, lon1 = coord1
+    lat2, lon2 = coord2
+
+    R = 6371000  # Radio de la Tierra en metros
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+
+    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
+    c = 2 * atan2(sqrt(a), sqrt(1 - a))
+
+    return R * c
+
+
+# Diccionario para guardar la posición inicial de cada dron
+initial_positions = {}
+
+# Diccionario para guardar la distancia total recorrida por cada dron
+total_distances = {}
+
+
+def processTelemetryInfo(id, telemetry_info):
+    global dronIcons, colors, traces, lock, altitudes, modos, initial_positions, total_distances
+
+    lat = telemetry_info.get('lat', 0)
+    lon = telemetry_info.get('lon', 0)
+    alt = telemetry_info.get('alt', 0)
+    modo = telemetry_info.get('flightMode', "Desconocido")
+    speed = telemetry_info.get('groundSpeed', 0)
+    heading = telemetry_info.get('heading', 0)
+
+    if lat == 0 and lon == 0:
+        print(f"⚠️ Dron {id}: Datos de telemetría inválidos, ignorando paquete.")
+        return
+
+    # Si es la primera vez que recibimos datos de este dron, guardamos su posición inicial
+    if id not in initial_positions:
+        initial_positions[id] = (lat, lon)
+        total_distances[id] = 0  # Reiniciar la distancia recorrida
+
+    # Calcular distancia recorrida desde la última posición
+    last_pos = traces[id][-1]['pos'] if traces[id] else initial_positions[id]
+    segment_distance = haversine_distance(last_pos, (lat, lon))
+    total_distances[id] += segment_distance
+
+    # Muestra la distancia recorrida
+    #print(f"Dron {id} ({colors[id]}): {round(total_distances[id], 2)} metros recorridos.")
+
+    # Si es el primer paquete de este dron, poner el icono en el mapa
+    if not dronIcons[id]:
+        dronIcons[id] = map_widget.set_marker(lat, lon, icon=dronPictures[id], icon_anchor="center")
+    else:
+        dronIcons[id].set_position(lat, lon)  # Actualizar la posición en el mapa
+
+    # Actualizanla altitud y el modo de vuelo en la interfaz
+    if id < len(altitudes) and id < len(modos):
+        altitudes[id]['text'] = f"Altitud: {round(alt, 2)}m"
+        modos[id]['text'] = f"Modo: {modo}"
+
+    # Guardar la telemetría
+    with lock:
+        if traces[id] is None:
+            traces[id] = []
+        traces[id].append({
+            'pos': (lat, lon),
+            'alt': alt,
+            'speed': speed,
+            'heading': heading,
+            'flightMode': modo
+        })
+
+
+def showFlightDistances():
+    global total_distances, colors
+
+    if not total_distances:
+        messagebox.showinfo("Sin datos", "No hay datos de vuelo disponibles.")
+        return
+
+    distances = []
+
+    for id, distance in total_distances.items():
+        color_name = colors[id] if id < len(colors) else f"Dron {id + 1}"
+        distances.append(f"{color_name}: {round(distance, 2)} metros recorridos")
+
+    messagebox.showinfo("Distancias de Vuelo", "\n".join(distances))
+
+
+import matplotlib.pyplot as plt
+
+def plotFlightReport():
+    global traces
+    if not traces:
+        messagebox.showinfo("Sin datos", "No hay datos de vuelo disponibles.")
+        return
+
+    plt.figure(figsize=(10, 6))
+    for i, trace in enumerate(traces):
+        latitudes = [point['pos'][0] for point in trace]
+        longitudes = [point['pos'][1] for point in trace]
+        plt.plot(longitudes, latitudes, label=f"Dron {i + 1}")
+
+    plt.xlabel("Longitud")
+    plt.ylabel("Latitud")
+    plt.title("Rutas de vuelo")
+    plt.legend()
+    plt.show()
+
+
 
 
 if __name__ == "__main__":

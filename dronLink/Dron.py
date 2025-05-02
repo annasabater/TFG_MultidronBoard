@@ -18,6 +18,7 @@ class Dron(object):
         self.lon = 0
         self.alt = 0
         self.groundSpeed = 0
+        self.activo = True
 
         self.frequency = None  #numero de muestras de telemetría por segundo
 
@@ -65,3 +66,44 @@ class Dron(object):
     from dronLink.modules.dron_move import move_distance, _move_distance, _prepare_command_mov,setMoveSpeed, _checkSpeedZero
     from dronLink.modules.dron_bottomGeofence  import startBottomGeofence, stopBottomGeofence,  _minAltChecking
     from dronLink.modules.message_handler import MessageHandler
+
+
+def aplicarRestriccionesDeZona(self, poligono):
+    """
+    Guarda internamente el área permitida del dron.
+    Esto se puede usar para validaciones locales si se desea restringir manualmente
+    el movimiento desde el código Python.
+    """
+    self.zonaPermitida = poligono
+
+
+def estaDentroDeSuZona(self):
+    """
+    Chequea si la posición actual del dron está dentro de su área permitida.
+    Útil para crear una "barrera" desde software.
+    """
+    from shapely.geometry import Point, Polygon
+
+    if not hasattr(self, 'zonaPermitida'):
+        return True  # Si no se ha definido zona, no se restringe
+
+    punto = Point(self.lat, self.lon)
+    poligono = Polygon([(p['lat'], p['lon']) for p in self.zonaPermitida])
+
+    return poligono.contains(punto)
+
+def computeNewPosition(self, direction):
+    step = 0.00003
+    lat = self.lat
+    lon = self.lon
+
+    if direction == "up":
+        return (lat + step, lon)
+    elif direction == "down":
+        return (lat - step, lon)
+    elif direction == "left":
+        return (lat, lon - step)
+    elif direction == "right":
+        return (lat, lon + step)
+    else:
+        return (lat, lon)

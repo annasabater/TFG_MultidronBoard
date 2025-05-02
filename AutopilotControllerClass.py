@@ -105,11 +105,30 @@ class AutopilotController:
                 dron.takeOff(5, blocking=False, callback=self.publish_event, params='flying')
 
         if command == 'go':
-            id = int (parts[3])
+            id = int(parts[3])
             dron = self.swarm[id]
             if dron.state == 'flying':
                 direction = message.payload.decode("utf-8")
-                dron.go(direction)
+                # Calcula la nueva posición según la dirección
+                new_lat, new_lon = dron.computeNewPosition(direction)
+                blocked = False
+                # Obtiene el escenario actual del dron (donde el primer fence es de inclusión y el resto son obstáculos)
+                scenario = dron.getScenario()
+                if scenario:
+                    for fence in scenario[1:]:
+                        if fence['type'] == 'polygon':
+                            if punto_dentro_poligono((new_lat, new_lon), fence['waypoints']):
+                                blocked = True
+                                break
+                        elif fence['type'] == 'circle':
+                            center = (fence['lat'], fence['lon'])
+                            if haversine(new_lat, new_lon, center[0], center[1]) < fence['radius']:
+                                blocked = True
+                                break
+                if not blocked:
+                    dron.go(direction)
+                else:
+                    print(f"Dron {id} ha intentat entrar en un obstacle. Moviment cancel·lat.")
 
         if command == 'Land':
             id = int (parts[3])
@@ -124,6 +143,37 @@ class AutopilotController:
             if dron.state == 'flying':
                 # operación no bloqueante. Cuando acabe publicará el evento correspondiente
                 dron.RTL(blocking=False, callback=self.publish_event, params='atHome')
+
+import math
+import geopy.distance
+
+def punto_dentro_poligono(point, polygon):
+    lat, lon = point
+    inside = False
+    j = len(polygon) - 1
+
+    for i in range(len(polygon)):
+        lat_i, lon_i = polygon[i]['lat'], polygon[i]['lon']
+        lat_j, lon_j = polygon[j]['lat'], polygon[j]['lon']
+
+        if ((lon_i > lon) != (lon_j > lon)) and \
+           (lat < (lat_j - lat_i) * (lon - lon_i) / (lon_j - lon_i + 1e-12) + lat_i):
+            inside = not inside
+        j = i
+    return inside
+
+
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371000  # Radi de la Terra en metres
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+
+    a = math.sin(delta_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+    return R * c
 
 
 
