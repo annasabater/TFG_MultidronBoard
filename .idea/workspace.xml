@@ -5,21 +5,12 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="1da3c4dc-7240-4b2b-a745-1fcafd148539" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/competenciaConMobile.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/competenciaConMobile_prova.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/competenciaSinMobile.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/generar_escenario.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/multidronBoardConMobile_prova.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/server.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/.gitignore" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/inspectionProfiles/Project_Default.xml" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/inspectionProfiles/profiles_settings.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/profiles_settings.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/multidronBoard.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/multidronBoard.iml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/AutopilotControllerClass.py" beforeDir="false" afterPath="$PROJECT_DIR$/AutopilotControllerClass.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/dronLink/Dron.py" beforeDir="false" afterPath="$PROJECT_DIR$/dronLink/Dron.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/multidronBoardConMobile.py" beforeDir="false" afterPath="$PROJECT_DIR$/multidronBoardConMobile.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.env" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/competenciaSinMobile_prova.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/competenciaConMobile.py" beforeDir="false" afterPath="$PROJECT_DIR$/competenciaConMobile.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/competenciaConMobile_prova.py" beforeDir="false" afterPath="$PROJECT_DIR$/competenciaConMobile_prova.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/competenciaSinMobile.py" beforeDir="false" afterPath="$PROJECT_DIR$/competenciaSinMobile.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -41,30 +32,30 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "Python.AutopilotControllerClass.executor": "Run",
-    "Python.competenciaConMobile.executor": "Run",
-    "Python.competenciaConMobile_prova.executor": "Run",
-    "Python.competenciaConMobile_prova1.executor": "Run",
-    "Python.competenciaSinMobile.executor": "Run",
-    "Python.competenciaSinMobile_prova.executor": "Run",
-    "Python.controladores.executor": "Run",
-    "Python.generar_escenario.executor": "Run",
-    "Python.generar_escenario_2.executor": "Run",
-    "Python.generar_escenario_3.executor": "Run",
-    "Python.main.executor": "Run",
-    "Python.multidronBoardConMobile.executor": "Run",
-    "Python.multidronBoardConMobile_prova.executor": "Run",
-    "Python.multidronBoardSinMobile.executor": "Run",
-    "Python.server.executor": "Run",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "RunOnceActivity.git.unshallow": "true",
-    "git-widget-placeholder": "main",
-    "last_opened_file_path": "C:/Users/LENOVO/Desktop/EETAC/TFG/2. Codig/multidronBoard",
-    "settings.editor.selected.configurable": "preferences.lookFeel"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;Python.AutopilotControllerClass.executor&quot;: &quot;Run&quot;,
+    &quot;Python.competenciaConMobile.executor&quot;: &quot;Run&quot;,
+    &quot;Python.competenciaConMobile_prova.executor&quot;: &quot;Run&quot;,
+    &quot;Python.competenciaConMobile_prova1.executor&quot;: &quot;Run&quot;,
+    &quot;Python.competenciaSinMobile.executor&quot;: &quot;Run&quot;,
+    &quot;Python.competenciaSinMobile_prova.executor&quot;: &quot;Run&quot;,
+    &quot;Python.controladores.executor&quot;: &quot;Run&quot;,
+    &quot;Python.generar_escenario.executor&quot;: &quot;Run&quot;,
+    &quot;Python.generar_escenario_2.executor&quot;: &quot;Run&quot;,
+    &quot;Python.generar_escenario_3.executor&quot;: &quot;Run&quot;,
+    &quot;Python.main.executor&quot;: &quot;Run&quot;,
+    &quot;Python.multidronBoardConMobile.executor&quot;: &quot;Run&quot;,
+    &quot;Python.multidronBoardConMobile_prova.executor&quot;: &quot;Run&quot;,
+    &quot;Python.multidronBoardSinMobile.executor&quot;: &quot;Run&quot;,
+    &quot;Python.server.executor&quot;: &quot;Run&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;main&quot;,
+    &quot;last_opened_file_path&quot;: &quot;C:/Users/LENOVO/Desktop/EETAC/TFG/2. Codig/multidronBoard&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;preferences.lookFeel&quot;
   }
-}]]></component>
+}</component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
       <recent name="C:\Users\LENOVO\Desktop\EETAC\TFG\2. Codig\multidronBoard" />

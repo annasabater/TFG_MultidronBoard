@@ -3,14 +3,11 @@ import math
 import random
 from tkinter import ttk
 import tkinter as tk
-import os
 import matplotlib.pyplot as plt
 import time
 import threading
 from tkinter import messagebox
-from tkinter.simpledialog import askstring
 import tkintermapview
-from PIL import Image, ImageTk
 import pyautogui
 import win32gui
 import glob
@@ -25,6 +22,122 @@ from math import radians, sin, cos, sqrt, atan2
 from PIL import Image, ImageTk, ImageEnhance
 from shapely.geometry import Point, Polygon
 from shapely.affinity import rotate
+import os, sys, time, threading
+import requests
+import socketio
+from dotenv import load_dotenv
+from tkinter.simpledialog import askstring
+global swarm
+
+
+load_dotenv()
+SERVER_URL = os.getenv('SERVER_URL')
+ADMIN_KEY = os.getenv('ADMIN_KEY', '')
+
+if not SERVER_URL or not ADMIN_KEY:
+    print("Debes definir SERVER_URL y ADMIN_KEY en tu .env")
+    sys.exit(1)
+
+def login(email, password):
+    resp = requests.post(
+        f"{SERVER_URL}/api/auth/login",
+        json={"email": email, "password": password}
+    )
+    if resp.status_code != 200:
+        print(f"Login fallido para {email}: {resp.text}")
+        sys.exit(1)
+    return resp.json().get("accesstoken")
+
+
+# --- crea un cliente socket para el profesor ---
+sio_prof = socketio.Client(logger=False, engineio_logger=False)
+
+@sio_prof.event(namespace='/professor')
+def connect():
+    print("Profesor conectado a /professor")
+
+@sio_prof.event(namespace='/professor')
+def connect_error(data):
+    print("Error al conectar a /professor:", data)
+
+try:
+    sio_prof.connect(
+        SERVER_URL,
+        transports=['websocket'],
+        namespaces=['/professor'],
+        auth={'/professor': {'key': ADMIN_KEY}}
+    )
+except Exception as e:
+    print("No pude conectar a /professor:", e)
+    sys.exit(1)
+
+def make_dron_client(color, token):
+    sio = socketio.Client(logger=False, engineio_logger=False)
+
+    @sio.event(namespace='/jocs')
+    def connect():
+        print(f"🔌 Dron {color} conectado a /jocs")
+
+    sio.connect(
+        SERVER_URL,
+        auth={'token': token},
+        transports=['websocket'],
+        namespaces=['/jocs']
+    )
+    return sio
+
+DRONS = {
+    'rojo':     (os.getenv('DRON_ROJO_EMAIL'),     os.getenv('DRON_ROJO_PASSWORD')),
+    'azul':     (os.getenv('DRON_AZUL_EMAIL'),     os.getenv('DRON_AZUL_PASSWORD')),
+    'verde':    (os.getenv('DRON_VERDE_EMAIL'),    os.getenv('DRON_VERDE_PASSWORD')),
+    'amarillo': (os.getenv('DRON_AMARILLO_EMAIL'), os.getenv('DRON_AMARILLO_PASSWORD')),
+}
+
+dron_clients = {}
+
+for color, (email, pwd) in DRONS.items():
+    if not email or not pwd:
+        print(f"Falta email/password para dron {color} en .env")
+        sys.exit(1)
+    token = login(email, pwd)
+    dron_clients[color] = make_dron_client(color, token)
+
+positions = { color: (0.0, 0.0) for color in dron_clients.keys() }
+email_to_color = { creds[0]: color for color,creds in DRONS.items() }
+color_to_pid   = {'rojo':0, 'azul':1, 'verde':2, 'amarillo':3}
+
+
+@sio_prof.on('control', namespace='/professor')
+def on_control(data):
+    color_email = data['drone']
+    action      = data['action']
+    payload     = data.get('payload', {})
+
+    color_key = email_to_color.get(color_email)
+    if color_key is None:
+        print(f"unknown drone email {color_email}")
+        return
+
+    pid = color_to_pid[color_key]
+    dron = swarm[pid]
+
+    if action == 'move':
+        dx, dy = payload['dx'], payload['dy']
+        lat, lon = positions[color_key]
+        new_lat = lat + dy * 0.00005
+        new_lon = lon + dx * 0.00005
+        # guarda la nueva posición
+        positions[color_key] = (new_lat, new_lon)
+        mover_dron(dron, (new_lat, new_lon), player_id=pid)
+
+    elif action == 'fire':
+        btype = payload.get('type','medium')
+        shoot(pid, btype)
+
+    else:
+        print(f"unknown action {action}")
+
+
 
 active_bullets = [] # Lista para almacenar balas activas
 players = []
@@ -924,14 +1037,6 @@ def esquivar_obstaculo(dron, nueva_pos):
     print("No se encontró una ruta alternativa.")
 
 
-def check_all_fences_completed():
-    global player_fences_completed, numPlayers
-
-    if sum(player_fences_completed.values()) == numPlayers:
-        messagebox.showinfo("Configuración de Obstáculos", "Pon en el mapa los obstáculos")
-        map_widget.add_left_click_map_command(colocar_obstaculo)
-
-
 def colocar_obstaculo(coords):
     global map_widget, obstacles, numPlayers
     global mirror_placement, removing_obstacles
@@ -1369,7 +1474,9 @@ def check_all_fences_closed():
 
 
 # me contecto a los drones del enjambre
+@sio_prof.event(namespace='/professor')
 def connect():
+    print("(/professor) conectado")
     global swarm
     global connected, dron, dronIcons
     global altitudes, modos
@@ -1814,17 +1921,6 @@ def displayResults():
         results += f"\nEquipo ganador: {ganador}!"
 
 
-def initializePlayers(num_players):
-    global players, teams
-    players = [{'id': i, 'status': 'active', 'eliminations': 0, 'shots': 0, 'team': None} for i in range(num_players)]
-    if game_mode == "teams":
-        # team=0 para drones 0,1
-        # team=1 para drones 2,3
-        teams = [0, 0, 1, 1]
-        for i, player in enumerate(players):
-            player['team'] = teams[i]
-
-
 def startGame():
     global players, eliminated_players, recording_enabled
     global game_clock_label, game_timer_running, game_elapsed_seconds
@@ -1836,6 +1932,7 @@ def startGame():
         swarm[player['id']].takeOff(5, blocking=False)
 
     messagebox.showinfo("Inicio del Juego", "El juego ha comenzado!")
+    print("Se ha iniciado el juego")
     startGameBtn['bg'] = 'green'
     mostrar_botones_cambio_dron()
     display_shooting_options()
@@ -3261,6 +3358,17 @@ def survival_check_loop():
 
 
 if __name__ == "__main__":
+
+    session_id = askstring("Sesión", "Session ID para empezar la partida:")
+    if session_id:
+        sio_prof.emit('startCompetition', {'sessionId': session_id}, namespace='/professor')
+        print("startCompetition enviado")
+
     ventana = crear_ventana()
     setupControlButtons()
     ventana.mainloop()
+
+    sio_prof.disconnect(namespace='/professor')
+    for c in dron_clients.values():
+        c.disconnect(namespace='/jocs')
+

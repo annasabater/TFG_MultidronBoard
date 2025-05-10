@@ -3,14 +3,11 @@ import math
 import random
 from tkinter import ttk
 import tkinter as tk
-import os
 import matplotlib.pyplot as plt
 import time
 import threading
 from tkinter import messagebox
-from tkinter.simpledialog import askstring
 import tkintermapview
-from PIL import Image, ImageTk
 import pyautogui
 import win32gui
 import glob
@@ -24,6 +21,123 @@ from AutopilotControllerClass import AutopilotController
 from math import radians, sin, cos, sqrt, atan2
 from PIL import Image, ImageTk, ImageEnhance
 from shapely.geometry import Point, Polygon
+from shapely.affinity import rotate
+import os, sys, time, threading
+import requests
+import socketio
+from dotenv import load_dotenv
+from tkinter.simpledialog import askstring
+global swarm
+
+
+load_dotenv()
+SERVER_URL = os.getenv('SERVER_URL')
+ADMIN_KEY = os.getenv('ADMIN_KEY', '')
+
+if not SERVER_URL or not ADMIN_KEY:
+    print("Debes definir SERVER_URL y ADMIN_KEY en tu .env")
+    sys.exit(1)
+
+def login(email, password):
+    resp = requests.post(
+        f"{SERVER_URL}/api/auth/login",
+        json={"email": email, "password": password}
+    )
+    if resp.status_code != 200:
+        print(f"Login fallido para {email}: {resp.text}")
+        sys.exit(1)
+    return resp.json().get("accesstoken")
+
+
+# --- crea un cliente socket para el profesor ---
+sio_prof = socketio.Client(logger=False, engineio_logger=False)
+
+@sio_prof.event(namespace='/professor')
+def connect():
+    print("Profesor conectado a /professor")
+
+@sio_prof.event(namespace='/professor')
+def connect_error(data):
+    print("Error al conectar a /professor:", data)
+
+try:
+    sio_prof.connect(
+        SERVER_URL,
+        transports=['websocket'],
+        namespaces=['/professor'],
+        auth={'/professor': {'key': ADMIN_KEY}}
+    )
+except Exception as e:
+    print("No pude conectar a /professor:", e)
+    sys.exit(1)
+
+def make_dron_client(color, token):
+    sio = socketio.Client(logger=False, engineio_logger=False)
+
+    @sio.event(namespace='/jocs')
+    def connect():
+        print(f"🔌 Dron {color} conectado a /jocs")
+
+    sio.connect(
+        SERVER_URL,
+        auth={'token': token},
+        transports=['websocket'],
+        namespaces=['/jocs']
+    )
+    return sio
+
+DRONS = {
+    'rojo':     (os.getenv('DRON_ROJO_EMAIL'),     os.getenv('DRON_ROJO_PASSWORD')),
+    'azul':     (os.getenv('DRON_AZUL_EMAIL'),     os.getenv('DRON_AZUL_PASSWORD')),
+    'verde':    (os.getenv('DRON_VERDE_EMAIL'),    os.getenv('DRON_VERDE_PASSWORD')),
+    'amarillo': (os.getenv('DRON_AMARILLO_EMAIL'), os.getenv('DRON_AMARILLO_PASSWORD')),
+}
+
+dron_clients = {}
+
+for color, (email, pwd) in DRONS.items():
+    if not email or not pwd:
+        print(f"Falta email/password para dron {color} en .env")
+        sys.exit(1)
+    token = login(email, pwd)
+    dron_clients[color] = make_dron_client(color, token)
+
+positions = { color: (0.0, 0.0) for color in dron_clients.keys() }
+email_to_color = { creds[0]: color for color,creds in DRONS.items() }
+color_to_pid   = {'rojo':0, 'azul':1, 'verde':2, 'amarillo':3}
+
+
+@sio_prof.on('control', namespace='/professor')
+def on_control(data):
+    color_email = data['drone']
+    action      = data['action']
+    payload     = data.get('payload', {})
+
+    color_key = email_to_color.get(color_email)
+    if color_key is None:
+        print(f"unknown drone email {color_email}")
+        return
+
+    pid = color_to_pid[color_key]
+    dron = swarm[pid]
+
+    if action == 'move':
+        dx, dy = payload['dx'], payload['dy']
+        lat, lon = positions[color_key]
+        new_lat = lat + dy * 0.00005
+        new_lon = lon + dx * 0.00005
+        # guarda la nueva posición
+        positions[color_key] = (new_lat, new_lon)
+        mover_dron(dron, (new_lat, new_lon), player_id=pid)
+
+    elif action == 'fire':
+        btype = payload.get('type','medium')
+        shoot(pid, btype)
+
+    else:
+        print(f"unknown action {action}")
+
+
 
 active_bullets = [] # Lista para almacenar balas activas
 players = []
@@ -95,17 +209,21 @@ lock = threading.Lock()
 ########## Funciones para la creación de multi escenarios #################################
 def createBtnClick():
     global gameModeFrame
-    gameModeFrame.grid_remove()
     global mode_selected
-    mode_selected = True
-    global scenario
+    global scenario, selectedMultiScenario, multiScenario, obstacles, scenarios
+
+    multiScenario = {'numPlayers': 0, 'scenarios': []}
     scenario = []
-    # limpiamos el mapa de los elementos que tenga
-    clear()
-    # quitamos los otros frames
+    selectedMultiScenario = None
+    obstacles.clear()
+    scenarios = []
+
+    gameModeFrame.grid_remove()
+    mode_selected = True
+
     selectFrame.grid_forget()
     superviseFrame.grid_forget()
-    # visualizamos el frame de creación
+
     createFrame.grid(row=1, column=0, columnspan=3, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
 
     createBtn['text'] = 'Creando...'
@@ -120,11 +238,11 @@ def createBtnClick():
     superviseBtn['fg'] = 'black'
     superviseBtn['bg'] = 'dark orange'
 
-    # Ocultar el botón "Iniciar Juego" y las opciones de disparo
     startGameBtn.grid_remove()
     for widget in controlFrame.winfo_children():
         if isinstance(widget, tk.LabelFrame) and widget.cget("text") == "Opciones de Disparo":
             widget.grid_remove()
+
     controlButtonsFrame.grid_remove()
     mostrar_controles_juego()
     mantener_escenario_visible()
@@ -302,27 +420,30 @@ def screenshot(window_title=None):
 def registerScenario():
     global multiScenario, obstacles, placing_obstacles
 
-    # Agregar los obstáculos al escenario
+    escenario_name = name.get().strip()
+    if not escenario_name:
+        # Si está vacío, mostrar un aviso y no registrar
+        messagebox.showerror("Falta nombre", "Por favor, introduce un nombre para el escenario antes de registrarlo.")
+        return
+
     for scenario in multiScenario['scenarios']:
         scenario['scenario'].extend(obstacles)
 
-    # Guardar el multi escenario en un archivo JSON
-    jsonFilename = 'competencia/' + name.get() + "_" + str(numPlayers) + ".json"
+    jsonFilename = f"competencia/{escenario_name}_{numPlayers}.json"
     with open(jsonFilename, 'w') as f:
         json.dump(multiScenario, f)
 
-    # Capturar la imagen del escenario
     im = screenshot('Gestión de escenarios')
-    imageFilename = 'competencia/' + name.get() + "_" + str(numPlayers) + ".png"
+    imageFilename = f"competencia/{escenario_name}_{numPlayers}.png"
     im.save(imageFilename)
 
-    # Limpiar el mapa después de guardar
-    multiScenario = []
+    multiScenario.clear()
     clear()
 
-    # Desactiva la colocación de obstáculos y restaurar el click a fences
     placing_obstacles = False
     map_widget.add_left_click_map_command(getFenceWaypoint)
+
+    messagebox.showinfo("¡Listo!", f"Escenario '{escenario_name}' registrado correctamente.")
 
 
 # genera el poligono que aproxima al círculo
@@ -343,10 +464,17 @@ def getCircle(lat, lon, radius):
 def selectBtnClick():
     global scenarios, current, polys
     global selectFrame, gameModeFrame
+    global multiScenario, scenario, obstacles
 
+    multiScenario = {'numPlayers': 0, 'scenarios': []}
+    scenario = []
+    obstacles.clear()
+
+    # Limpia el mapa por si hay cosas dibujadas
     scenarios = []
     clear()
 
+    # Sigue tu lógica actual:
     createFrame.grid_forget()
     superviseFrame.grid_forget()
 
@@ -445,9 +573,13 @@ def showNext():
 
 def clear():
     global paths, polys, fence, numPlayers, obstacles, placing_obstacles
+    global multiScenario, scenario, mode_selected, name
+    global createBtn, selectPlayersFrame
 
+    # Reinicializa el contenido del campo nombre (de la entrada)
     name.set("")
 
+    # Borrar los elementos gráficos del mapa
     for path in paths:
         path.delete()
     paths.clear()
@@ -459,33 +591,33 @@ def clear():
             pass
     polys.clear()
 
-    # ELIMINAR obstáculos del mapa
-    for obs in obstacles:
-        if obs['type'] == 'polygon':
-            poly_points = [(p['lat'], p['lon']) for p in obs['waypoints']]
-            for poly in polys[:]:
-                if set(poly.position_list) == set(poly_points):
-                    try:
-                        poly.delete()
-                        polys.remove(poly)
-                    except:
-                        pass
-
-    # Vaciar la lista de obstáculos
+    # Reiniciar la variable fence y limpiar obstáculos
+    fence = None
     obstacles.clear()
 
-    fence = None
+    # Reinicializar las estructuras de escenario
+    scenario = []
+    multiScenario = {'numPlayers': 0, 'scenarios': []}
     numPlayers = 0
+    mode_selected = False  # Se sale del modo "creando"
+    placing_obstacles = False
+    map_widget.add_left_click_map_command(getFenceWaypoint)  # Restablecer el callback
 
-    # Restaurar la pantalla de selección de jugadores
+    # Restablecer el botón "Crear" a su estado original
+    createBtn['text'] = 'Crear'
+    createBtn['fg'] = 'black'
+    createBtn['bg'] = 'dark orange'
+
+    # Borrar y reconstruir la sección de selección de número de jugadores
     for widget in selectPlayersFrame.winfo_children():
         widget.destroy()
 
-    tk.Label(selectPlayersFrame, text='Selecciona el número de jugadores').grid(row=0, column=0, columnspan=4, padx=5, pady=5)
-    # Configurar columnas para que se expandan equitativamente
+    tk.Label(selectPlayersFrame, text='Selecciona el número de jugadores') \
+        .grid(row=0, column=0, columnspan=4, padx=5, pady=5, sticky=tk.N+tk.E+tk.W)
+    # Configurar las columnas para que se expandan proporcionalmente
     for i in range(4):
         selectPlayersFrame.columnconfigure(i, weight=1)
-
+    # Crear botones para 1 a 4 jugadores
     for i in range(1, 5):
         tk.Button(
             selectPlayersFrame,
@@ -493,17 +625,8 @@ def clear():
             bg="dark orange",
             font=("Arial", 9),
             command=lambda n=i: selectNumPlayers(n)
-        ).grid(
-            row=1,
-            column=i - 1,
-            padx=5,
-            pady=5,
-            sticky="nsew"
-        )
-
-    # Desactiva la opción de construir obstáculos y restaura el click a fences
-    placing_obstacles = False
-    map_widget.add_left_click_map_command(getFenceWaypoint)
+        ).grid(row=1, column=i - 1, padx=5, pady=5, sticky="nsew")
+    createBtnClick()
 
 
 # borramos el escenario que esta a la vista
@@ -664,18 +787,15 @@ def sendScenario():
 
 # configuración del frame con los botones 2 min, 5 min, 8 min y supervivencia
 def mostrar_configuracion_juego():
-    global configuracionFrame
+    global configuracionFrame, numPlayers
 
     configuracionFrame.grid(row=8, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
 
+    # Limpiar cualquier botón previo
     for widget in configuracionFrame.winfo_children():
         widget.destroy()
 
-    # Configurar 4 columnas para que se expandan equitativamente
-    for i in range(4):
-        configuracionFrame.columnconfigure(i, weight=1)
-
-    # Botones alineados en una fila
+    # --- Botones de tiempo y supervivencia ---
     tk.Button(configuracionFrame, text="2 min", bg="dark orange",
               command=lambda: seleccionar_configuracion_tiempo(2)) \
         .grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
@@ -691,6 +811,62 @@ def mostrar_configuracion_juego():
     tk.Button(configuracionFrame, text="Modo Supervivencia", bg="dark orange",
               command=seleccionar_modo_supervivencia) \
         .grid(row=0, column=3, padx=5, pady=5, sticky="nsew")
+
+    # Si tenemos 4 jugadores, mostramos “2 vs 2”
+    if numPlayers == 4:
+        tk.Button(configuracionFrame, text="2 vs 2", bg="dark orange",
+                  command=seleccionar_tiempo_teams
+                  ) \
+            .grid(row=1, column=0, columnspan=2, padx=5, pady=5, sticky="nsew")
+
+
+def seleccionar_tiempo_teams():
+    global game_mode, game_duration, survival_mode
+
+    game_mode = "teams"  # Modo de juego 2 vs 2
+
+    # Creamos la ventana emergente
+    top = tk.Toplevel()
+    top.title("Tiempo de Juego (2 vs 2)")
+    top.geometry("700x550")
+    top.grab_set()  # Evita clics fuera hasta que se cierre
+
+    tk.Label(
+        top,
+        text="Selecciona la duración\npara el modo 2 vs 2",
+        font=("Arial", 10, "bold")
+    ).pack(pady=10)
+
+    # Función para asignar un tiempo en minutos
+    def set_tiempo(minutos):
+        global game_duration, survival_mode
+        survival_mode = False          # Desactivamos supervivencia
+        game_duration = minutos * 60   # Convertimos a segundos
+        top.destroy()                  # Cerramos la ventana emergente
+        configuracionFrame.grid_remove()   # Oculta tu frame de config
+        startGameBtn.grid(row=9, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
+        messagebox.showinfo("Modo 2 vs 2", f"Has seleccionado {minutos} minutos.")
+
+    # Función para modo supervivencia
+    def set_supervivencia():
+        global survival_mode, game_duration
+        survival_mode = True
+        game_duration = None           # Sin límite de tiempo
+        top.destroy()
+        configuracionFrame.grid_remove()
+        startGameBtn.grid(row=9, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
+        messagebox.showinfo("Modo 2 vs 2", "Has seleccionado Modo Supervivencia.")
+
+    # Botones para cada opción
+    tk.Button(top, text="2 min", bg="dark orange", command=lambda: set_tiempo(2)) \
+        .pack(pady=5, fill="x")
+    tk.Button(top, text="5 min", bg="dark orange", command=lambda: set_tiempo(5)) \
+        .pack(pady=5, fill="x")
+    tk.Button(top, text="8 min", bg="dark orange", command=lambda: set_tiempo(8)) \
+        .pack(pady=5, fill="x")
+
+    tk.Button(top, text="Modo Supervivencia", bg="dark orange", command=set_supervivencia) \
+        .pack(pady=10, fill="x")
 
 
 # Al seleccionar tiempo
@@ -793,6 +969,11 @@ def punto_dentro_poligono(point, polygon):
 
 
 def mover_dron(dron, nueva_pos, player_id=None):
+    # Si el dron no está "active", no se mueve
+    if players[player_id]['status'] != 'active':
+        print(f"El dron {player_id} está en estado {players[player_id]['status']} y no puede moverse.")
+        return
+
     if verificar_colision(nueva_pos, player_id):
         print(f"Jugador {player_id} intenta passar per un obstacle. Tornant a la posició anterior.")
         if player_id in last_valid_positions:
@@ -856,14 +1037,6 @@ def esquivar_obstaculo(dron, nueva_pos):
     print("No se encontró una ruta alternativa.")
 
 
-def check_all_fences_completed():
-    global player_fences_completed, numPlayers
-
-    if sum(player_fences_completed.values()) == numPlayers:
-        messagebox.showinfo("Configuración de Obstáculos", "Pon en el mapa los obstáculos")
-        map_widget.add_left_click_map_command(colocar_obstaculo)
-
-
 def colocar_obstaculo(coords):
     global map_widget, obstacles, numPlayers
     global mirror_placement, removing_obstacles
@@ -883,7 +1056,6 @@ def colocar_obstaculo(coords):
     inclinacion = -15
     rad = math.radians(inclinacion)
 
-    # Snap a vecino si quieres
     coords = snap_a_vecino(coords, width, height, inclinacion)
 
     # Puntos del polígono inclinado
@@ -973,122 +1145,175 @@ def snap_a_vecino(click_coords, width, height, inclinacion_deg, margen_snap=0.00
 
     return click_coords  # Si no encaja con ninguno, deja la posición original
 
+def fence_to_waypoints(fence):
 
-from shapely.geometry import Polygon
+    if fence["type"] == "polygon":
+        return fence["waypoints"]
+
+    elif fence["type"] == "circle":
+        circle_points = getCircle(fence["lat"], fence["lon"], fence["radius"])
+        return [{"lat": lat, "lon": lon} for (lat, lon) in circle_points]
+
+    else:
+        return []
+
+
+def get_bounding_box_from_waypoints(waypoints):
+    lats = [p["lat"] for p in waypoints]
+    lons = [p["lon"] for p in waypoints]
+
+    return {
+        'min_lat': min(lats),
+        'max_lat': max(lats),
+        'min_lon': min(lons),
+        'max_lon': max(lons)
+    }
+
 
 def mirror_obstacle(obstacle):
-    global selectedMultiScenario, multiScenario, numPlayers, polys, obstacles
 
-    # Escenario fuente (multiScenario o selectedMultiScenario)
-    scenario_source = (selectedMultiScenario
-                       if 'selectedMultiScenario' in globals() and selectedMultiScenario
-                       else multiScenario)
+    if selectedMultiScenario and selectedMultiScenario.get('scenarios'):
+        scenario_source = selectedMultiScenario
+    else:
+        scenario_source = multiScenario
 
-    fences = [s['scenario'][0] for s in scenario_source['scenarios'] if s['scenario']]
-    if len(fences) < numPlayers:
-        return  # todavía no están definidas todas las zonas
+    # Cantidad real de jugadores
+    total_players = scenario_source.get('numPlayers', 0)
 
-    # Área de referencia: el fence del primer jugador (ej. "rojo")
-    base_fence = fences[0]
-    base_bbox = get_bounding_box(base_fence['waypoints'])  # tu función actual
+    # -- FENCE DEL JUGADOR 0 (Rojo) --
+    fence_roja = scenario_source['scenarios'][0]['scenario'][0]
+    red_poly = fence_to_polygon(fence_roja)
 
-    # Por cada jugador desde 1 hasta numPlayers-1
-    for i in range(1, numPlayers):
-        target_fence = fences[i]
+    # REFLEJO HACIA EL JUGADOR 1 (Azul) SOLO SI >=2 JUGADORES
+    if total_players >= 2:
+        fence_azul = scenario_source['scenarios'][1]['scenario'][0]
+        blue_poly = fence_to_polygon(fence_azul)
 
-        # 1) Creamos el polígono de Shapely del fence destino
-        target_polygon = fence_to_polygon(target_fence)
+        new_obs_blue = mirror_obstacle_center_to_center(obstacle, red_poly, blue_poly)
+        if new_obs_blue:
+            obstacles.append(new_obs_blue)
+            poly_draw = map_widget.set_polygon(
+                [(p['lat'], p['lon']) for p in new_obs_blue['waypoints']],
+                fill_color='black', outline_color='black', border_width=1
+            )
+            polys.append(poly_draw)
 
-        # 2) Calculamos la posición espejada de cada waypoint en 'obstacle'
-        target_bbox = get_bounding_box(target_fence['waypoints'])
+    # REFLEJO HACIA EL JUGADOR 2 (Verde) SOLO SI >=3 JUGADORES
+    if total_players >= 3:
+        fence_verde = scenario_source['scenarios'][2]['scenario'][0]
+        green_poly = fence_to_polygon(fence_verde)
 
-        # Construimos la lista de puntos "mirrored_waypoints"
-        mirrored_waypoints = []
-        for point in obstacle['waypoints']:
-            rel_lat = ((point['lat'] - base_bbox['min_lat']) /
-                       (base_bbox['max_lat'] - base_bbox['min_lat'] + 1e-10))
-            rel_lon = ((point['lon'] - base_bbox['min_lon']) /
-                       (base_bbox['max_lon'] - base_bbox['min_lon'] + 1e-10))
+        new_obs_green = mirror_obstacle_center_to_center(obstacle, red_poly, green_poly)
+        if new_obs_green:
+            obstacles.append(new_obs_green)
+            poly_draw = map_widget.set_polygon(
+                [(p['lat'], p['lon']) for p in new_obs_green['waypoints']],
+                fill_color='black', outline_color='black', border_width=1
+            )
+            polys.append(poly_draw)
 
-            new_lat = (target_bbox['min_lat'] +
-                       rel_lat * (target_bbox['max_lat'] - target_bbox['min_lat']))
-            new_lon = (target_bbox['min_lon'] +
-                       rel_lon * (target_bbox['max_lon'] - target_bbox['min_lon']))
+    # REFLEJO HACIA EL JUGADOR 3 (Amarillo) SOLO SI ==4 JUGADORES
+    if total_players >= 4:
+        fence_amarilla = scenario_source['scenarios'][3]['scenario'][0]
+        yellow_poly = fence_to_polygon(fence_amarilla)
 
-            mirrored_waypoints.append({'lat': new_lat, 'lon': new_lon})
-
-        # 3) Construimos un polígono shapely con la versión espejada
-        mirrored_coords = [(wp['lon'], wp['lat']) for wp in mirrored_waypoints]
-        mirrored_polygon = Polygon(mirrored_coords)
-
-        # 4) Intersectamos con la zona del fence destino
-        intersected_polygon = target_polygon.intersection(mirrored_polygon)
-
-        if not intersected_polygon.is_empty:
-            # Si la intersección NO está vacía,
-            # necesitamos “convertirla” a la misma estructura que tu programa maneja
-            # intersected_polygon puede ser Polígono o MultiPolígono.
-            if intersected_polygon.geom_type == 'Polygon':
-                final_coords = list(intersected_polygon.exterior.coords)
-                # final_coords son [(x1, y1), (x2, y2), ...] => x=lon, y=lat
-                # Hay que convertir a tu formato [{'lat':..., 'lon':...}, ...]
-                final_waypoints = [{'lat': y, 'lon': x} for (x, y) in final_coords]
-
-                new_obstacle = {
-                    'type': 'polygon',
-                    'waypoints': final_waypoints,
-                    'altitude': 5
-                }
-                obstacles.append(new_obstacle)
-
-                # Lo dibujamos en el mapa
-                poly = map_widget.set_polygon(
-                    [(p['lat'], p['lon']) for p in new_obstacle['waypoints']],
-                    fill_color='black',
-                    outline_color='black',
-                    border_width=1
-                )
-                polys.append(poly)
-
-            elif intersected_polygon.geom_type == 'MultiPolygon':
-                # Si la intersección da varios polígonos (caso raro),
-                # recorremos cada polígono interno
-                for geom in intersected_polygon.geoms:
-                    final_coords = list(geom.exterior.coords)
-                    final_waypoints = [{'lat': y, 'lon': x} for (x, y) in final_coords]
-
-                    new_obstacle = {
-                        'type': 'polygon',
-                        'waypoints': final_waypoints,
-                        'altitude': 5
-                    }
-                    obstacles.append(new_obstacle)
-
-                    poly = map_widget.set_polygon(
-                        [(p['lat'], p['lon']) for p in new_obstacle['waypoints']],
-                        fill_color='black',
-                        outline_color='black',
-                        border_width=1
-                    )
-                    polys.append(poly)
-            # Si quieres ignorar cualquier otro caso, no haces nada
+        new_obs_yellow = mirror_obstacle_center_to_center(obstacle, red_poly, yellow_poly)
+        if new_obs_yellow:
+            obstacles.append(new_obs_yellow)
+            poly_draw = map_widget.set_polygon(
+                [(p['lat'], p['lon']) for p in new_obs_yellow['waypoints']],
+                fill_color='black', outline_color='black', border_width=1
+            )
+            polys.append(poly_draw)
 
 
 def fence_to_polygon(fence):
     if fence["type"] == "polygon":
-        # fence['waypoints'] = [{'lat': ..., 'lon': ...}, ...]
         coords = [(p["lon"], p["lat"]) for p in fence["waypoints"]]
         return Polygon(coords)
-
     elif fence["type"] == "circle":
-        # Usas tu función getCircle para aproximar el círculo
-        circle_points = getCircle(fence["lat"], fence["lon"], fence["radius"])
-        # getCircle te devuelve lista de (lat, lon). Shapely espera (x, y) = (lon, lat)
-        coords = [(lon, lat) for (lat, lon) in circle_points]
+        circle_pts = getCircle(fence["lat"], fence["lon"], fence["radius"])
+        coords = [(lon, lat) for (lat, lon) in circle_pts]
         return Polygon(coords)
-
     else:
         return None
+
+import math
+from shapely.geometry import Polygon, LineString
+from shapely import affinity
+
+def mirror_obstacle_center_to_center(obstacle, red_poly, blue_poly):
+
+    # Convertir obstáculo a Polygon de Shapely (si es circle, convertir primero)
+    if obstacle['type'] == 'circle':
+        circle_pts = getCircle(obstacle['lat'], obstacle['lon'], obstacle['radius'])
+        obstacle['waypoints'] = [{'lat': p[0], 'lon': p[1]} for p in circle_pts]
+        obstacle['type'] = 'polygon'
+
+    obs_coords = [(pt['lon'], pt['lat']) for pt in obstacle['waypoints']]
+    obs_poly = Polygon(obs_coords)
+    if obs_poly.is_empty:
+        print("Obstáculo vacío, nada que reflejar.")
+        return None
+
+    # Hallar centroides de rojos y azules
+    centro_rojo = red_poly.centroid
+    centro_azul = blue_poly.centroid
+
+    # Crear una línea de 'eje' => de centro_rojo a centro_azul
+    eje_line = LineString([centro_rojo, centro_azul])
+    if eje_line.length == 0:
+        print("Los centros de rojo y azul son idénticos, no hay línea para reflejar.")
+        return None
+
+    # Calcular ángulo de esa línea para “acostarla” (rotar a horizontal)
+    x0, y0 = eje_line.coords[0]
+    x1, y1 = eje_line.coords[1]
+    dx = x1 - x0
+    dy = y1 - y0
+    angle_radians = math.atan2(dy, dx)
+    angle_degs = -angle_radians * 180.0 / math.pi  # rotación en grados con signo
+
+    # Rotamos el obstáculo => la línea pasa a estar horizontal
+    origin_pt = eje_line.centroid
+    obs_rotado = affinity.rotate(obs_poly, angle_degs, origin=origin_pt, use_radians=False)
+
+    # Flip horizontal (x=-1) en torno al mismo 'origin_pt'
+    obs_flipped = affinity.scale(obs_rotado, xfact=-1, yfact=1, origin=origin_pt)
+
+    # Desrotamos volviendo a +angle
+    obs_final = affinity.rotate(obs_flipped, -angle_degs, origin=origin_pt, use_radians=False)
+
+    # Intersección con la zona azul (para no salirnos)
+    intersec = obs_final.intersection(blue_poly)
+    if intersec.is_empty:
+        print("No hay intersección tras reflejar, nada que mostrar.")
+        return None
+
+    # Manejar si es MultiPolygon
+    if intersec.geom_type == 'MultiPolygon':
+        biggest_area = 0
+        chosen_poly = None
+        for geom in intersec.geoms:
+            if geom.area > biggest_area:
+                biggest_area = geom.area
+                chosen_poly = geom
+        if not chosen_poly:
+            return None
+        intersec = chosen_poly
+
+    if intersec.geom_type != 'Polygon':
+        print(f"Intersección final no es polígono simple: {intersec.geom_type}")
+        return None
+
+    # Convertir a dict con waypoints lat/lon
+    final_coords = list(intersec.exterior.coords)
+    new_wps = [{'lat': y, 'lon': x} for (x, y) in final_coords]
+    return {
+        'type': 'polygon',
+        'waypoints': new_wps,
+        'altitude': obstacle.get('altitude', 5)
+    }
 
 
 def punto_dentro_poligonos_dibujados(punto):
@@ -1197,28 +1422,47 @@ def selectNumPlayers(num):
     global redPlayerBtn, bluePlayerBtn, greenPlayerBtn, yellowPlayerBtn
     global multiScenario
     global numPlayers
+    global buttons
+    global selectPlayersFrame
 
+    for b in buttons:
+        if b is not None:
+            b.destroy()
+    buttons.clear()
+
+    for widget in selectPlayersFrame.winfo_children():
+        if isinstance(widget, tk.Button) and "Crea el escenario para el jugador" in widget.cget("text"):
+            widget.destroy()
+
+    # Fijas el número de jugadores y reinicias la estructura multiScenario
     numPlayers = num
     multiScenario = {
         'numPlayers': num,
         'scenarios': []
     }
 
-    # Ajustamos la apariencia para evitar que se corte
-    for widget in selectPlayersFrame.winfo_children():
-        if isinstance(widget, tk.Button) and "Crea el escenario" in widget.cget("text"):
-            widget.destroy()
-
+    # Creamos tantos botones como numPlayers
     colors = [('red', 'rojo'), ('blue', 'azul'), ('green', 'verde'), ('yellow', 'amarillo')]
 
     for i in range(num):
         color, label = colors[i]
-        btn = tk.Button(selectPlayersFrame, text=f"Crea el escenario para el jugador {label}", bg=color, fg='white',
-                        font=("Arial", 8, "bold"), width=25, height=2, command=lambda c=color: createPlayer(c))
+        btn = tk.Button(
+            selectPlayersFrame,
+            text=f"Crea el escenario para el jugador {label}",
+            bg=color,
+            fg="white",
+            font=("Arial", 8, "bold"),
+            width=25,
+            height=2,
+            command=lambda c=color: createPlayer(c)
+        )
         btn.grid(row=2 + i, column=0, columnspan=4, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
         buttons.append(btn)
 
-    redPlayerBtn, bluePlayerBtn, greenPlayerBtn, yellowPlayerBtn = (buttons + [None] * (4 - num))
+    while len(buttons) < 4:
+        buttons.append(None)
+
+    redPlayerBtn, bluePlayerBtn, greenPlayerBtn, yellowPlayerBtn = buttons[0], buttons[1], buttons[2], buttons[3]
 
 
 #Verifica si todos los jugadores han definido su área y cierra el fence. Luego habilita la colocación de obstáculos.
@@ -1230,7 +1474,9 @@ def check_all_fences_closed():
 
 
 # me contecto a los drones del enjambre
+@sio_prof.event(namespace='/professor')
 def connect():
+    print("(/professor) conectado")
     global swarm
     global connected, dron, dronIcons
     global altitudes, modos
@@ -1327,14 +1573,58 @@ def esperar_telemetria_valida(dron, timeout=8):
 
 
 def get_bounding_box(waypoints):
-    lats = [p['lat'] for p in waypoints]
-    lons = [p['lon'] for p in waypoints]
+
+    lats = [wp['lat'] for wp in waypoints]
+    lons = [wp['lon'] for wp in waypoints]
     return {
         'min_lat': min(lats),
         'max_lat': max(lats),
         'min_lon': min(lons),
         'max_lon': max(lons)
     }
+
+
+def mirror_and_rotate_obstacle_shapely(obstacle, base_fence, target_fence, angle_deg=60):
+    base_bbox   = get_bounding_box(base_fence['waypoints'])
+    target_bbox = get_bounding_box(target_fence['waypoints'])
+
+    # Construir la lista de waypoints del obstáculo
+    obs_wps = obstacle['waypoints']  # [{'lat':..., 'lon':...}, ...]
+
+    mirrored_coords = []
+    for wp in obs_wps:
+        lat = wp['lat']
+        lon = wp['lon']
+
+        # Posición normalizada en la zona base (0..1)
+        rel_lat = (lat - base_bbox['min_lat']) / (base_bbox['max_lat'] - base_bbox['min_lat'] + 1e-12)
+        rel_lon = (lon - base_bbox['min_lon']) / (base_bbox['max_lon'] - base_bbox['min_lon'] + 1e-12)
+
+        # Reflejamos en el eje horizontal => invertimos 'lon'
+        new_lat = target_bbox['min_lat'] + rel_lat * (target_bbox['max_lat'] - target_bbox['min_lat'])
+        new_lon = target_bbox['max_lon'] - rel_lon * (target_bbox['max_lon'] - target_bbox['min_lon'])
+
+        mirrored_coords.append( (new_lon, new_lat) )  # en shapely: (x, y)=(lon, lat)
+
+    # 2) Crear polígono shapely a partir de mirrored_coords
+    poly_mirrored = Polygon(mirrored_coords)
+
+    # 3) Rotar -20° (en grados; origin='centroid' o un punto X)
+    #  Nota: Con shapely, rotate(geom, angle, use_radians=False) rota en sentido antihorario.
+    rotated_poly = rotate(poly_mirrored, angle_deg, origin='centroid', use_radians=False)
+
+    # 4) Extraer las coords finales en formato lat/lon
+    final_waypoints = []
+    for (x, y) in rotated_poly.exterior.coords:
+        final_waypoints.append({'lat': y, 'lon': x})
+
+    # 5) Construir el nuevo obstáculo
+    new_obstacle = {
+        'type': 'polygon',
+        'waypoints': final_waypoints,
+        'altitude': obstacle.get('altitude', 5)
+    }
+    return new_obstacle
 
 
 def calcular_centro(waypoints):
@@ -1543,8 +1833,10 @@ def update_drone_icon_on_landing(drone_id):
     pos = dronIcons[drone_id].position
     dronIcons[drone_id].delete()
     dronIcons[drone_id] = map_widget.set_marker(pos[0], pos[1],
-                                                 icon=dronLandedPictures[drone_id],
-                                                 icon_anchor="center")
+                                                icon=dronLandedPictures[drone_id],
+                                                icon_anchor="center")
+    # Cambiar status a "landed"
+    players[drone_id]['status'] = "landed"
 
 
 def update_drone_icon_on_takeoff(drone_id):
@@ -1561,37 +1853,38 @@ def checkGameEnd():
     # Jugadores vivos
     active_players = [p for p in players if p['status'] == 'active']
 
+    #  Caso TODOS CONTRA TODOS en supervivencia
     if game_mode == "free_for_all" and survival_mode:
-        if len(active_players) == 1:
-            winner_id = active_players[0]['id']
-            messagebox.showinfo("Fin del Juego",
-                                f"¡El jugador {winner_id + 1} ha ganado en modo supervivencia (último en pie)!")
+        if len(active_players) <= 1:
+            if len(active_players) == 1:
+                winner_id = active_players[0]['id']
+                messagebox.showinfo("Fin del Juego",
+                                    f"¡El jugador {winner_id + 1} ha ganado en modo supervivencia (último en pie)!")
+            else:
+                messagebox.showinfo("Fin del Juego", "No quedó ningún jugador con vida.")
             endGame()
             show_game_stats()
+        return
 
-    if game_mode == "teams" and survival_mode:
-        if len(active_players) == 0:
-            messagebox.showinfo("Fin del Juego", "¡No queda ningún jugador con vida!")
+    #  Caso 2 vs 2 en supervivencia
+    if game_mode == "teams":
+        # Contamos cuántos quedan activos en cada equipo
+        active_team0 = sum(1 for p in players if p['team'] == 0 and p['status'] == 'active')
+        active_team1 = sum(1 for p in players if p['team'] == 1 and p['status'] == 'active')
+
+        # Si equipo 0 se quedó sin drones activos, gana equipo 1
+        if active_team0 == 0:
+            messagebox.showinfo("Fin del Juego", "¡Equipo Verde-Amarillo (drones 2 y 3) ha ganado!")
             endGame()
             show_game_stats()
             return
 
-        # Verificar si todos son del mismo equipo
-        primer_equipo = active_players[0]['team']
-        todos_mismo_equipo = all(p['team'] == primer_equipo for p in active_players)
-
-        if todos_mismo_equipo:
-            if primer_equipo == 0:
-                equipo_ganador = "Rojo-Azul"
-            else:
-                equipo_ganador = "Verde-Amarillo"
-            messagebox.showinfo(
-                "Fin del Juego",
-                f"¡El equipo {equipo_ganador} ha ganado en modo supervivencia!"
-            )
+        # Si equipo 1 se quedó sin drones activos, gana equipo 0
+        if active_team1 == 0:
+            messagebox.showinfo("Fin del Juego", "¡Equipo Rojo-Azul (drones 0 y 1) ha ganado!")
             endGame()
             show_game_stats()
-        return
+            return
 
 
 def endGame():
@@ -1628,15 +1921,6 @@ def displayResults():
         results += f"\nEquipo ganador: {ganador}!"
 
 
-def initializePlayers(num_players):
-    global players, teams
-    players = [{'id': i, 'status': 'active', 'eliminations': 0, 'shots': 0, 'team': None} for i in range(num_players)]
-    if game_mode == "teams":
-        teams = [0, 1] * (num_players // 2)
-        for i, player in enumerate(players):
-            player['team'] = teams[i]
-
-
 def startGame():
     global players, eliminated_players, recording_enabled
     global game_clock_label, game_timer_running, game_elapsed_seconds
@@ -1648,6 +1932,7 @@ def startGame():
         swarm[player['id']].takeOff(5, blocking=False)
 
     messagebox.showinfo("Inicio del Juego", "El juego ha comenzado!")
+    print("Se ha iniciado el juego")
     startGameBtn['bg'] = 'green'
     mostrar_botones_cambio_dron()
     display_shooting_options()
@@ -1742,7 +2027,6 @@ def crear_ventana():
     selectFrame = tk.LabelFrame(controlFrame, text='Selecciona escenario', font=("Arial", 8, "bold"))
 
     # Frame de modos de juego (dentro de selectFrame)
-
     gameModeFrame = tk.LabelFrame(selectFrame, text='Modo de Juego')
     gameModeFrame.grid(row=2, column=0, columnspan=3, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
     gameModeFrame.rowconfigure(0, weight=1)
@@ -1979,7 +2263,6 @@ def crear_ventana():
     map_widget.add_left_click_map_command(getFenceWaypoint)
 
     # ahora cargamos las imagenes de los iconos que vamos a usar
-
     im = Image.open("images/red.png").convert("RGBA")
     r, g, b, a = im.split()
     rgb = Image.merge("RGB", (r, g, b))
@@ -2038,7 +2321,7 @@ def crear_ventana():
     colors = ['red', 'blue', 'green', 'yellow']
     dronLittlePictures = [littleRed, littleBlue, littleGreen, littleYellow]
 
-    # Ahora cargamos los iconos para cuando el dron aterrice (por ejemplo, con efecto "line")
+    # Ahora cargamos los iconos para cuando el dron aterrice
     im = Image.open("images/red_line.png")
     im_resized = im.resize((25, 25), Image.LANCZOS)
     red_line = ImageTk.PhotoImage(im_resized)
@@ -2291,6 +2574,7 @@ def plotFlightReport():
     scenario_photo = ImageTk.PhotoImage(scaled_image)
     canvas.create_image(0, 0, image=scenario_photo, anchor="nw")
 
+
     # Función para convertir una latitud y longitud en coordenadas para el canvas utilizando Mercator
     def latlon_to_xy_canvas(lat, lon):
         # La coordenada X se calcula de forma lineal (la proyección en X es lineal en la mayoría de mapas web)
@@ -2307,6 +2591,7 @@ def plotFlightReport():
         if not dron_trace:
             continue  # Si no hay datos para ese dron, saltar
         color_line = dron_colors[dron_id % 4]
+
         # Dibujar línea entre cada par de puntos consecutivos del rastreo
         for i in range(len(dron_trace) - 1):
             lat1, lon1 = dron_trace[i]['pos']
@@ -2319,10 +2604,12 @@ def plotFlightReport():
 
 
 def get_scenario_bounding_box(multiScenario):
+
     min_lat = 999999
     max_lat = -999999
     min_lon = 999999
     max_lon = -999999
+
     for element in multiScenario['scenarios']:
         scenario = element['scenario']
         for fence in scenario:
@@ -2338,6 +2625,7 @@ def get_scenario_bounding_box(multiScenario):
                         min_lon = lon
                     if lon > max_lon:
                         max_lon = lon
+
             elif fence['type'] == 'circle':
                 c_lat = fence['lat']
                 c_lon = fence['lon']
@@ -2348,6 +2636,7 @@ def get_scenario_bounding_box(multiScenario):
                 lat_max = c_lat + deg_lat
                 lon_min = c_lon - deg_lon
                 lon_max = c_lon + deg_lon
+
                 if lat_min < min_lat:
                     min_lat = lat_min
                 if lat_max > max_lat:
@@ -2358,11 +2647,9 @@ def get_scenario_bounding_box(multiScenario):
                     max_lon = lon_max
     return min_lat, max_lat, min_lon, max_lon
 
-
+# Convierte una latitud (en grados)
 def lat_to_mercator(lat):
-    """
-    Convierte una latitud (en grados) a su valor de proyección Mercator.
-    """
+
     lat_rad = math.radians(lat)
     return math.log(math.tan(math.pi/4 + lat_rad/2))
 
@@ -2380,6 +2667,11 @@ def shoot(player_id, bullet_type):
 
     if game_paused:
         print("Disparo bloqueado: el juego está en pausa.")
+        return
+
+    # Bloquear si no está en status active
+    if players[player_id]['status'] != 'active':
+        print(f"El dron {player_id} está en estado {players[player_id]['status']} y no puede disparar.")
         return
 
     bullet_info = bullet_types[bullet_type]
@@ -2417,12 +2709,13 @@ def shoot(player_id, bullet_type):
 
 def eliminateDrone(drone_id):
     global eliminated_players, survival_mode
+
     # Actualizar estado y aterrizar el dron
     players[drone_id]['status'] = 'eliminated'
     swarm[drone_id].Land(blocking=False)
     eliminated_players.add(drone_id)
 
-    # Llamar a la función para actualizar el icono del dron a la versión de aterrizaje (oscuro)
+    # Llamar a la función para actualizar el icono del dron a la versión de aterrizaje
     # Se lanza en un thread para no bloquear la interfaz.
     threading.Thread(target=update_drone_icon_on_landing, args=(drone_id,), daemon=True).start()
 
@@ -2556,10 +2849,10 @@ def destroy_obstacle(obstacle):
         if obs in obstacles:
             obstacles.remove(obs)
 
-    # Remover del multi escenario, haciendo una comparación similar
+
     for scenario in selectedMultiScenario.get("scenarios", []):
         objs_to_remove = []
-        # Se omite el primer elemento (fence principal) y se recorre el resto
+        # Se omite el fence principal y se recorre el resto
         for existing_obs in scenario["scenario"][1:]:
             if existing_obs['type'] == obstacle['type']:
                 if obstacle['type'] == 'polygon':
@@ -2579,6 +2872,7 @@ def destroy_obstacle(obstacle):
 def get_bbox(obstacle):
     # Para obstáculo tipo polígono, usamos los waypoints
     # para tipo círculo, usamos la aproximación a círculo
+
     if obstacle['type'] == 'polygon':
         pts = [(p['lat'], p['lon']) for p in obstacle['waypoints']]
     elif obstacle['type'] == 'circle':
@@ -2607,7 +2901,7 @@ def show_game_stats():
 
     stats_window = tk.Toplevel()
     stats_window.title("📊 Estadísticas del Juego")
-    stats_window.geometry("1700x450")
+    stats_window.geometry("1700x550")
     stats_window.configure(bg="white")
 
     style = ttk.Style()
@@ -2777,7 +3071,7 @@ def restartGame():
             swarm[i].takeOff(5, blocking=True)
             swarm[i].goto(lat, lon, 5)
 
-            # 🔥 Aquí reiniciamos correctamente la distancia DESPUÉS de llegar
+            # reiniciamos la distancia
             initial_positions[i] = (lat, lon)
             total_distances[i] = 0
 
@@ -3050,11 +3344,11 @@ def set_mirror_mode(value):
         print("Modo de colocación: Individual")
 
 
+ # Este bucle se ejecuta mientras el juego esté corriendo en modo supervivencia
 def survival_check_loop():
-    # Este bucle se ejecuta mientras el juego esté corriendo en modo supervivencia
     global players, game_timer_running, survival_mode
+
     while game_timer_running and survival_mode:
-        # Se considera "activo" al jugador (dron) si su estado es 'active'
         active_players = [p for p in players if p['status'] == 'active']
         if len(active_players) <= 1:
             # Si solo queda uno (o ninguno), finalizamos el juego
@@ -3064,6 +3358,17 @@ def survival_check_loop():
 
 
 if __name__ == "__main__":
+
+    session_id = askstring("Sesión", "Session ID para empezar la partida:")
+    if session_id:
+        sio_prof.emit('startCompetition', {'sessionId': session_id}, namespace='/professor')
+        print("startCompetition enviado")
+
     ventana = crear_ventana()
     setupControlButtons()
     ventana.mainloop()
+
+    sio_prof.disconnect(namespace='/professor')
+    for c in dron_clients.values():
+        c.disconnect(namespace='/jocs')
+
