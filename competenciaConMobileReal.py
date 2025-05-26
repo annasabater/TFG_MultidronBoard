@@ -38,6 +38,16 @@ if not SERVER_URL or not ADMIN_KEY:
     print("Debes definir SERVER_URL y ADMIN_KEY en tu .env")
     sys.exit(1)
 
+PLAYER_COLORS  = ['rojo', 'azul', 'verde', 'amarillo']
+PLAYER_EMAILS  = [os.getenv(f'DRON_{c.upper()}_EMAIL') for c in PLAYER_COLORS]
+
+def color_of_id(id):          # 0-3 → 'rojo'…
+    return PLAYER_COLORS[id]
+
+def email_of_id(id):          # 0-3 → dron_rojo1@upc.edu …
+    return PLAYER_EMAILS[id]
+
+
 def login(email, password):
     resp = requests.post(
         f"{SERVER_URL}/api/auth/login",
@@ -2145,9 +2155,9 @@ def crear_ventana():
     littleYellow = ImageTk.PhotoImage(im_resized_plus)
 
     im = Image.open("images/black.png")
-    bullet_small_image = ImageTk.PhotoImage(im.resize((15, 15), Image.LANCZOS))
-    bullet_medium_image = ImageTk.PhotoImage(im.resize((18, 18), Image.LANCZOS))
-    bullet_large_image = ImageTk.PhotoImage(im.resize((21, 21), Image.LANCZOS))
+    bullet_small_image = ImageTk.PhotoImage(im.resize((18, 18), Image.LANCZOS))
+    bullet_medium_image = ImageTk.PhotoImage(im.resize((22, 22), Image.LANCZOS))
+    bullet_large_image = ImageTk.PhotoImage(im.resize((28, 28), Image.LANCZOS))
 
     # Lista de iconos para drones en vuelo
     dronPictures = [red, blue, green, yellow]
@@ -2391,9 +2401,9 @@ def lat_to_mercator(lat):
 
 
 bullet_types = {
-    "small_fast": {"speed": 250},
-    "medium": {"speed": 150},
-    "large_slow": {"speed": 70}
+    "small_fast": {"speed": 250, "radius": 0.8},
+    "medium":     {"speed": 150, "radius": 1.2},
+    "large_slow": {"speed":  70, "radius": 1.8}
 }
 
 
@@ -2435,12 +2445,15 @@ def shoot(player_id, bullet_type):
     # Crear marcador de la bala utilizando el icono seleccionado
     bullet_marker = map_widget.set_marker(start_pos[0], start_pos[1], icon=bullet_icon, icon_anchor="center")
 
-    step_size = bullet_info['speed'] / 10000000  # Escala
+    step_size = bullet_info['speed'] / 10000000
+    bullet_rad = bullet_info['radius']
 
-    # Iniciar movimiento de la bala en un hilo separado
-    bullet_thread = threading.Thread(target=move_bullet, args=(bullet_marker, start_pos, heading, step_size, player_id))
-    bullet_thread.start()
-    active_bullets.append(bullet_marker)
+    threading.Thread(
+        target=move_bullet,
+        args=(bullet_marker, start_pos, heading, step_size,
+              player_id, bullet_rad),
+        daemon=True
+    ).start()
 
 
 def eliminateDrone(drone_id):
@@ -2482,12 +2495,31 @@ def check_collision_with_drone(bullet_pos, shooter_id, threshold_meters=1):
     return None
 
 
-def update_score(event_type, player_id):
+def update_score(event_type: str, player_id: int):
+
+    # actualizo el contador local
     if event_type == "obstacle":
         player_scores[player_id] += 1
     elif event_type == "drone":
         player_scores[player_id] += 10
+
+    # emito al namespace /jocs para que el servidor reenvíe el state_update
+    color = color_of_id(player_id)
+    email = email_of_id(player_id)
+    dron_clients[color].emit(
+        'score',
+        {
+            'sessionId': session_id,
+            'drone':     email,
+            'score':     player_scores[player_id]
+        },
+        namespace='/jocs'
+    )
+
+    # 3) actualizo la mini‐UI en Python (si usas la ventana de TK)
     update_mini_scores()
+
+
 
 
 def check_point_collision_with_obstacles(point, obstacles):
@@ -2986,69 +3018,6 @@ def survival_check_loop():
             break
         time.sleep(1)  # Espera 1 segundo antes de la siguiente comprobación
 
-def colocar_obstaculo(coords):
-    global map_widget, obstacles, numPlayers
-    global mirror_placement, removing_obstacles
-
-    # Si por error estamos en modo eliminar, no hacemos nada
-    if removing_obstacles:
-        return
-
-    # Verificar si el punto está dentro del área permitida
-    if not punto_dentro_poligonos_dibujados(coords):
-        messagebox.showerror("Error", "¡El obstáculo debe estar dentro del área de juego!")
-        return
-
-    # Cálculo del tamaño e inclinación (ajusta a tu gusto)
-    width = 0.0000095
-    height = 0.0000095
-    inclinacion = -15
-    rad = math.radians(inclinacion)
-
-    coords = snap_a_vecino(coords, width, height, inclinacion)
-
-    # Puntos del polígono inclinado
-    points = [
-        (coords[0] + width * math.cos(rad) - height * math.sin(rad),
-         coords[1] + width * math.sin(rad) + height * math.cos(rad)),
-        (coords[0] - width * math.cos(rad) - height * math.sin(rad),
-         coords[1] - width * math.sin(rad) + height * math.cos(rad)),
-        (coords[0] - width * math.cos(rad) + height * math.sin(rad),
-         coords[1] - width * math.sin(rad) - height * math.cos(rad)),
-        (coords[0] + width * math.cos(rad) + height * math.sin(rad),
-         coords[1] + width * math.sin(rad) - height * math.cos(rad))
-    ]
-
-    # Crear obstáculo
-    obstaculo = {
-        'type': 'polygon',
-        'waypoints': [{'lat': p[0], 'lon': p[1]} for p in points],
-        'altitude': 5
-    }
-    obstacles.append(obstaculo)
-
-    # Dibujarlo en el mapa
-    poly = map_widget.set_polygon(
-        [(p['lat'], p['lon']) for p in obstaculo['waypoints']],
-        fill_color='black', outline_color='black', border_width=1
-    )
-    polys.append(poly)
-
-    # Si estamos en modo espejo y hay varios jugadores, replicamos
-    if mirror_placement and numPlayers > 1:
-        mirror_obstacle(obstaculo)
-
-    obstaculo = {'type': 'polygon', 'waypoints': [...], 'altitude': 5}
-    obstacles.append(obstaculo)
-    # notifica al backend
-    dron_clients[color].emit('obstacle', {
-        'sessionId': session_id,
-        'drone': os.getenv(f"DRON_{color.upper()}_EMAIL"),
-        'type': 'polygon',
-        'geometry': obstaculo['waypoints'],
-        'event': 'add'
-    }, namespace='/jocs')
-
 
 # me contecto a los drones del enjambre
 @sio_prof.event(namespace='/professor')
@@ -3217,317 +3186,286 @@ def startGame():
 
     for color_key, (email, _) in DRONS.items():
         idx = color_to_pid[color_key]
-        area = selectedMultiScenario['scenarios'][idx]['scenario'][0]
-        # si es polígono:
-        if area['type'] == 'polygon':
-            geom = area['waypoints']
-        else:
-            geom = {
-                'lat': area['lat'],
-                'lon': area['lon'],
-                'radius': area['radius']
-            }
+        scene = selectedMultiScenario['scenarios'][idx]['scenario']
 
+        area = scene[0]
         dron_clients[color_key].emit(
             'fence',
             {
                 'sessionId': session_id,
                 'drone': email,
                 'fenceType': idx,
-                'geometry': geom,
+                'geometry': area['waypoints'] if area['type'] == "polygon" else {
+                    'lat': area['lat'], 'lon': area['lon'], 'radius': area['radius']
+                },
                 'event': 'add'
             },
             namespace='/jocs'
         )
 
+        for obst in scene[1:]:
+            obstacles.append(obst)
+            poly = map_widget.set_polygon(
+                [(p['lat'], p['lon']) for p in obst['waypoints']],
+                fill_color='black', outline_color='black', border_width=1
+            )
+            polys.append(poly)
 
-def processTelemetryInfo(id, telemetry_info):
-    global dronIcons, frontMarkers, colors, traces, lock
-    global altitudes, modos, recording_enabled
-    global initial_positions, total_distances, direction_lines, last_valid_positions
-
-    lat = telemetry_info.get('lat', 0)
-    lon = telemetry_info.get('lon', 0)
-    alt = telemetry_info.get('alt', 0)
-    modo = telemetry_info.get('flightMode', "Desconocido")
-    speed = telemetry_info.get('groundSpeed', 0)
-    heading = telemetry_info.get('heading', 0)
-    current_pos = (lat, lon)
-
-    if lat == 0 and lon == 0:
-        print(f"Dron {id}: Datos de telemetría inválidos, ignorando paquete.")
-        return
-
-    if should_reset_distance.get(id, False):
-        initial_positions[id] = (lat, lon)
-        total_distances[id] = 0
-        should_reset_distance[id] = False
-
-    # Verifica si intenta sortir del seu escenari
-    if not is_inside_player_area(id, current_pos):
-        print(f"Jugador {id} intenta sortir de la seva zona assignada. Tornant a la posició anterior.")
-        if id in last_valid_positions:
-            swarm[id].goto(last_valid_positions[id][0], last_valid_positions[id][1], 5)
-        return
-
-    # Verifica si intenta travessar un obstacle
-    if verificar_colision(current_pos, id):
-        print(f"Jugador {id} intenta passar per un obstacle. Tornant a la posició anterior.")
-        if id in last_valid_positions:
-            swarm[id].goto(last_valid_positions[id][0], last_valid_positions[id][1], 5)
-        return
-
-    last_valid_positions[id] = current_pos
-
-    # Mostrar dron en el mapa aunque no se esté grabando
-    if not dronIcons[id]:
-        dronIcons[id] = map_widget.set_marker(lat, lon, icon=dronPictures[id], icon_anchor="center")
-        frontMarkers[id] = map_widget.set_marker(lat, lon, icon=dronLittlePictures[id], icon_anchor="center")
-    else:
-        dronIcons[id].set_position(lat, lon)
-
-    # Actualizar la marca de dirección
-    front_lat = lat + 0.000008 * math.cos(math.radians(heading))
-    front_lon = lon + 0.000008 * math.sin(math.radians(heading))
-    frontMarkers[id].set_position(front_lat, front_lon)
-
-    if direction_lines[id]:
-        try:
-            direction_lines[id].delete()
-        except:
-            pass
-
-    line_end_lat = front_lat + 0.00090 * math.cos(math.radians(heading))
-    line_end_lon = front_lon + 0.00090 * math.sin(math.radians(heading))
-
-    direction_lines[id] = map_widget.set_path(
-        [(front_lat, front_lon), (line_end_lat, line_end_lon)],
-        color="black",
-        width=2
-    )
-
-    dron_clients[color].emit('telemetry', {
-        'sessionId': session_id,
-        'drone': os.getenv(f"DRON_{color.upper()}_EMAIL"),
-        'lat': lat, 'lon': lon, 'heading': heading
-    }, namespace='/jocs')
-
-    # Actualizar UI de altitud y modo
-    if id < len(altitudes) and id < len(modos):
-        altitudes[id]['text'] = f"Altitud: {round(alt, 2)}m"
-        modos[id]['text'] = f"Modo: {modo}"
-
-    # Solo grabar trazas y calcular distancia si el juego ha comenzado
-    if not recording_enabled:
-        return
-
-    if id not in initial_positions:
-        initial_positions[id] = (lat, lon)
-        total_distances[id] = 0
-
-    last_pos = traces[id][-1]['pos'] if traces[id] else initial_positions.get(id, (lat, lon))
-    segment_distance = haversine_distance(last_pos, (lat, lon))
-
-    # Asegurarse de que total_distances[id] exista
-    if id not in total_distances:
-        total_distances[id] = 0
-    total_distances[id] += segment_distance
-
-    with lock:
-        if traces[id] is None:
-            traces[id] = []
-        traces[id].append({
-            'pos': (lat, lon),
-            'alt': alt,
-            'speed': speed,
-            'heading': heading,
-            'flightMode': modo
-        })
-
-    dron_clients[color].emit('telemetry', {
-        'sessionId': session_id,
-        'drone': os.getenv(f"DRON_{color.upper()}_EMAIL"),
-        'lat': lat, 'lon': lon, 'heading': heading
-    }, namespace='/jocs')
-
-
-def move_bullet(bullet_marker, start_pos, heading, step_size, shooter_id):
-    lat, lon = start_pos
-    distance_traveled = 0
-    max_distance = 10000  # en metros
-
-    # Generar ID único para esta bala
-    bullet_id = str(uuid.uuid4())
-
-    # Emitir creación de la bala
-    dron_clients[color].emit(
-        'bullet',
-        {
-            'sessionId': session_id,
-            'drone': os.getenv(f"DRON_{color.upper()}_EMAIL"),
-            'bulletId': bullet_id,
-            'lat': lat,
-            'lon': lon,
-            'event': 'create'
-        },
-        namespace='/jocs'
-    )
-
-    while distance_traveled < max_distance:
-        # Calcular siguiente posición
-        next_lat = lat + step_size * math.cos(math.radians(heading))
-        next_lon = lon + step_size * math.sin(math.radians(heading))
-        bullet_point = Point(next_lon, next_lat)
-
-        # Revisar colisiones con obstáculos
-        for obstacle in obstacles[:]:
-            if obstacle['type'] == 'polygon':
-                try:
-                    poly_coords = [(wp['lon'], wp['lat']) for wp in obstacle['waypoints']]
-                    polygon = Polygon(poly_coords)
-                    if polygon.intersects(bullet_point) or polygon.touches(bullet_point):
-                        # Destruir obstáculo
-                        destroy_obstacle(obstacle)
-                        # Eliminar la bala
-                        bullet_marker.delete()
-                        if bullet_marker in active_bullets:
-                            active_bullets.remove(bullet_marker)
-                        update_score("obstacle", shooter_id)
-
-                        # Emitir evento 'destroy'
-                        dron_clients[color].emit(
-                            'bullet',
-                            {
-                                'sessionId': session_id,
-                                'drone': os.getenv(f"DRON_{color.upper()}_EMAIL"),
-                                'bulletId': bullet_id,
-                                'event': 'destroy'
-                            },
-                            namespace='/jocs'
-                        )
-                        return
-                except Exception as e:
-                    print(f"Error evaluando obstáculo: {e}", flush=True)
-                    continue
-
-        # Actualizar posición de la bala
-        lat, lon = next_lat, next_lon
-        bullet_marker.set_position(lat, lon)
-        distance_traveled += haversine_distance(start_pos, (lat, lon))
-
-        # Emitir evento 'move'
-        dron_clients[color].emit(
-            'bullet',
-            {
-                'sessionId': session_id,
-                'drone': os.getenv(f"DRON_{color.upper()}_EMAIL"),
-                'bulletId': bullet_id,
-                'lat': lat,
-                'lon': lon,
-                'event': 'move'
-            },
-            namespace='/jocs'
-        )
-
-        # Revisar colisión contra otros drones
-        impacted_id = check_collision_with_drone((lat, lon), shooter_id)
-        if impacted_id is not None:
-            # Eliminar la bala
-            bullet_marker.delete()
-            if bullet_marker in active_bullets:
-                active_bullets.remove(bullet_marker)
-            update_score("drone", shooter_id)
-            eliminateDrone(impacted_id)
-
-            # Emitir evento 'destroy' al impactar dron
-            dron_clients[color].emit(
-                'bullet',
+            dron_clients[color_key].emit(
+                'obstacle',
                 {
                     'sessionId': session_id,
-                    'drone': os.getenv(f"DRON_{color.upper()}_EMAIL"),
-                    'bulletId': bullet_id,
-                    'event': 'destroy'
+                    'drone': email,
+                    'type': obst['type'],
+                    'geometry': obst['waypoints'],
+                    'event': 'add'
                 },
                 namespace='/jocs'
             )
-            return
+
+
+def processTelemetryInfo(pid: int, info: dict):
+    global dronIcons, frontMarkers, traces, lock, direction_lines
+    global altitudes, modos, recording_enabled
+    global initial_positions, total_distances, last_valid_positions
+
+    lat     = info.get('lat', 0.0)
+    lon     = info.get('lon', 0.0)
+    alt     = info.get('alt', 0.0)
+    heading = info.get('heading', 0.0)
+    mode    = info.get('flightMode', "Unknown")
+    speed   = info.get('groundSpeed', 0.0)
+    pos     = (lat, lon)
+
+    # Descartar telemetría inválida
+    if lat == 0 and lon == 0:
+        return
+
+    # Restricciones de zona y obstáculos
+    if not is_inside_player_area(pid, pos) or verificar_colision(pos, pid):
+        if pid in last_valid_positions:
+            swarm[pid].goto(*last_valid_positions[pid], 5)
+        return
+
+    last_valid_positions[pid] = pos
+
+    # Pintar o actualizar icono del dron
+    if not dronIcons[pid]:
+        dronIcons[pid]    = map_widget.set_marker(lat, lon, icon=dronPictures[pid], icon_anchor="center")
+        frontMarkers[pid] = map_widget.set_marker(lat, lon, icon=dronLittlePictures[pid], icon_anchor="center")
+    else:
+        dronIcons[pid].set_position(lat, lon)
+
+    # Marca de dirección
+    nose_lat = lat + 0.000008 * math.cos(math.radians(heading))
+    nose_lon = lon + 0.000008 * math.sin(math.radians(heading))
+    frontMarkers[pid].set_position(nose_lat, nose_lon)
+
+    if direction_lines[pid]:
+        direction_lines[pid].delete()
+    tip_lat = nose_lat + 0.00090 * math.cos(math.radians(heading))
+    tip_lon = nose_lon + 0.00090 * math.sin(math.radians(heading))
+    direction_lines[pid] = map_widget.set_path(
+        [(nose_lat, nose_lon), (tip_lat, tip_lon)],
+        color="black", width=2
+    )
+
+    # UI de altitud y modo
+    if pid < len(altitudes):
+        altitudes[pid]['text'] = f"Alt: {alt:.1f} m"
+        modos[pid]['text']     = f"Mode: {mode}"
+
+    # Guardar traza y distancia
+    if recording_enabled:
+        with lock:
+            traces[pid].append({'pos':pos, 'alt':alt, 'speed':speed, 'heading':heading})
+        if pid not in initial_positions:
+            initial_positions[pid] = pos
+            total_distances[pid]   = 0
+        prev = traces[pid][-2]['pos'] if len(traces[pid])>1 else pos
+        total_distances[pid] += haversine_distance(prev, pos)
+
+    # Emitir evento al backend
+    color = color_of_id(pid)
+    email = email_of_id(pid)
+    dron_clients[color].emit(
+        'telemetry',
+        {'sessionId': session_id,
+         'drone'    : email,
+         'lat'      : lat,
+         'lon'      : lon,
+         'heading'  : heading},
+        namespace='/jocs'
+    )
+
+
+def move_bullet(marker,
+                start_pos: tuple[float, float],
+                heading: float,
+                step: float,
+                shooter_id: int,
+                radius_m: float) -> None:
+
+    lat, lon  = start_pos
+    bullet_id = str(uuid.uuid4())
+
+    color = color_of_id(shooter_id)
+    email = email_of_id(shooter_id)
+
+    # --------------- alta inicial ------------------------------------------------
+    dron_clients[color].emit(
+        'bullet',
+        {'sessionId': session_id, 'drone': email,
+         'bulletId':  bullet_id,
+         'lat': lat, 'lon': lon,
+         'event': 'create'},
+        namespace='/jocs'
+    )
+
+    dist          = 0
+    max_distance  = 10_000          # ≈ 10 km
+    deg_buffer    = radius_m / 111_111.0   # ~º lon/lat a esa latitud
+
+    while dist < max_distance:
+        # avanzamos
+        lat += step * math.cos(math.radians(heading))
+        lon += step * math.sin(math.radians(heading))
+        marker.set_position(lat, lon)
+        dist += haversine_distance(start_pos, (lat, lon))
+
+        # --------------- update WS ------------------------------------------------
+        dron_clients[color].emit(
+            'bullet',
+            {'sessionId': session_id, 'drone': email,
+             'bulletId':  bullet_id,
+             'lat': lat, 'lon': lon, 'event': 'move'},
+            namespace='/jocs'
+        )
+
+        # --------------- obstáculo ------------------------------------------------
+        hit = next((o for o in obstacles
+                    if o['type'] == 'polygon' and
+                       Polygon([(wp['lon'], wp['lat'])
+                                for wp in o['waypoints']])
+                       .buffer(deg_buffer).contains(Point(lon, lat))), None)
+        if hit:
+            destroy_obstacle(hit, shooter_id)
+            update_score("obstacle", shooter_id)
+            break
+
+        # --------------- dron -----------------------------------------------------
+        victim = check_collision_with_drone((lat, lon), shooter_id,
+                                            threshold_meters=radius_m)
+        if victim is not None:
+            update_score("drone", shooter_id)
+            eliminateDrone(victim)
+            break
 
         time.sleep(0.01)
 
-    # Si la bala recorrió todo el rango sin impactar, la destruimos
+    # --------------- fin / cleanup ----------------------------------------------
+    marker.delete()
     dron_clients[color].emit(
         'bullet',
+        {'sessionId': session_id, 'drone': email,
+         'bulletId':  bullet_id, 'event': 'destroy'},
+        namespace='/jocs'
+    )
+
+
+def destroy_obstacle(obstacle, remover_id: int = 0):
+    global obstacles, polys, selectedMultiScenario
+
+    tol = 1e-5
+    bbox = get_bbox(obstacle)
+
+    # Borrar del mapa
+    for poly in polys[:]:
+        try:
+            gen = {
+              'type': 'polygon',
+              'waypoints': [{'lat': p[0], 'lon': p[1]} for p in poly.position_list]
+            }
+            if get_bbox(gen) == bbox:
+                poly.delete()
+                polys.remove(poly)
+        except:
+            pass
+
+    # Borrar de la lista interna
+    if obstacle in obstacles:
+        obstacles.remove(obstacle)
+
+    # Borrar del escenario cargado
+    for scn in selectedMultiScenario.get('scenarios', []):
+        if obstacle in scn['scenario'][1:]:
+            scn['scenario'].remove(obstacle)
+
+    color = color_of_id(remover_id)
+    email = email_of_id(remover_id)
+    print(f"[DEBUG] Emitting obstacle remove: {obstacle['waypoints']}")
+    dron_clients[color].emit(
+        'obstacle',
         {
             'sessionId': session_id,
-            'drone': os.getenv(f"DRON_{color.upper()}_EMAIL"),
-            'bulletId': bullet_id,
-            'event': 'destroy'
+            'drone':     email,
+            'type':      obstacle['type'],
+            'geometry':  obstacle['waypoints'],
+            'event':     'remove'
         },
         namespace='/jocs'
     )
 
-def destroy_obstacle(obstacle):
-    global obstacles, polys, selectedMultiScenario
-    tolerance = 1e-5  # Tolerancia para comparar coordenadas
 
-    # Obtener bbox del obstáculo a eliminar
-    bbox_obs = get_bbox(obstacle)
+def colocar_obstaculo(coords, placer_id: int = 0):
+    global obstacles, polys
 
-    # Buscar y eliminar de la lista de polígonos
-    for poly in polys[:]:
-        try:
-            pts = poly.position_list  # Se asume que es una lista de (lat, lon)
-            poly_bbox = (min(p[0] for p in pts), max(p[0] for p in pts),
-                         min(p[1] for p in pts), max(p[1] for p in pts))
-            if (abs(bbox_obs[0] - poly_bbox[0]) < tolerance and
-                abs(bbox_obs[1] - poly_bbox[1]) < tolerance and
-                abs(bbox_obs[2] - poly_bbox[2]) < tolerance and
-                abs(bbox_obs[3] - poly_bbox[3]) < tolerance):
-                poly.delete()
-                polys.remove(poly)
-        except Exception as e:
-            print(f"Error al eliminar poly: {e}", flush=True)
-            continue
+    if removing_obstacles:
+        return
+    if not punto_dentro_poligonos_dibujados(coords):
+        messagebox.showerror("Error", "¡El obstáculo debe estar dentro del área!")
+        return
 
-    # Remover de la lista global de obstáculos todas las entradas similares
-    obstacles_to_remove = []
-    for obs in obstacles:
-        obs_bbox = get_bbox(obs)
-        if (abs(bbox_obs[0] - obs_bbox[0]) < tolerance and
-            abs(bbox_obs[1] - obs_bbox[1]) < tolerance and
-            abs(bbox_obs[2] - obs_bbox[2]) < tolerance and
-            abs(bbox_obs[3] - obs_bbox[3]) < tolerance):
-            obstacles_to_remove.append(obs)
-    for obs in obstacles_to_remove:
-        if obs in obstacles:
-            obstacles.remove(obs)
+    # Calcula los vértices del polígono
+    W, H, angle = 0.0000095, 0.0000095, -15
+    rad = math.radians(angle)
+    cx, cy = snap_a_vecino(coords, W, H, angle)
+    pts = [
+        (cx +  W*math.cos(rad) - H*math.sin(rad), cy +  W*math.sin(rad) + H*math.cos(rad)),
+        (cx -  W*math.cos(rad) - H*math.sin(rad), cy -  W*math.sin(rad) + H*math.cos(rad)),
+        (cx -  W*math.cos(rad) + H*math.sin(rad), cy -  W*math.sin(rad) - H*math.cos(rad)),
+        (cx +  W*math.cos(rad) + H*math.sin(rad), cy +  W*math.sin(rad) - H*math.cos(rad))
+    ]
 
+    obst = {
+        'type': 'polygon',
+        'waypoints': [{'lat': p[0], 'lon': p[1]} for p in pts],
+        'altitude': 5
+    }
 
-    for scenario in selectedMultiScenario.get("scenarios", []):
-        objs_to_remove = []
-        # Se omite el fence principal y se recorre el resto
-        for existing_obs in scenario["scenario"][1:]:
-            if existing_obs['type'] == obstacle['type']:
-                if obstacle['type'] == 'polygon':
-                    if (len(existing_obs['waypoints']) == len(obstacle['waypoints']) and
-                        all(abs(a['lat'] - b['lat']) < tolerance and abs(a['lon'] - b['lon']) < tolerance
-                            for a, b in zip(existing_obs['waypoints'], obstacle['waypoints']))):
-                        objs_to_remove.append(existing_obs)
-                elif obstacle['type'] == 'circle':
-                    if (abs(existing_obs['lat'] - obstacle['lat']) < tolerance and
-                        abs(existing_obs['lon'] - obstacle['lon']) < tolerance and
-                        abs(existing_obs['radius']  - obstacle['radius']) < tolerance):
-                        objs_to_remove.append(existing_obs)
-        for o in objs_to_remove:
-            scenario["scenario"].remove(o)
+    obstacles.append(obst)
+    poly_widget = map_widget.set_polygon(
+        [(p['lat'], p['lon']) for p in obst['waypoints']],
+        fill_color='black', outline_color='black', border_width=1
+    )
+    polys.append(poly_widget)
+    if mirror_placement and numPlayers > 1:
+        mirror_obstacle(obst)
 
-    dron_clients[color].emit('obstacle', {
-        'sessionId': session_id,
-        'drone': os.getenv(f"DRON_{color.upper()}_EMAIL"),
-        'type': obstacle['type'],
-        'geometry': obstacle.get('waypoints') or { 'lat':..., 'lon':..., 'radius':... },
-        'event': 'remove'
-    }, namespace='/jocs')
+    color = color_of_id(placer_id)
+    email = email_of_id(placer_id)
+    print(f"[DEBUG] Emitting obstacle add: {obst['waypoints']}")
+    dron_clients[color].emit(
+        'obstacle',
+        {
+            'sessionId': session_id,
+            'drone':     email,
+            'type':      obst['type'],
+            'geometry':  obst['waypoints'],
+            'event':     'add'
+        },
+        namespace='/jocs'
+    )
 
 
 if __name__ == "__main__":
