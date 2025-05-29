@@ -664,10 +664,11 @@ def sendScenario():
 
 # configuración del frame con los botones 2 min, 5 min, 8 min y supervivencia
 def mostrar_configuracion_juego():
-    global configuracionFrame
+    global configuracionFrame, numPlayers
 
     configuracionFrame.grid(row=8, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
 
+    # Limpiar cualquier botón previo
     for widget in configuracionFrame.winfo_children():
         widget.destroy()
 
@@ -688,9 +689,11 @@ def mostrar_configuracion_juego():
               command=lambda: seleccionar_configuracion_tiempo(8)) \
         .grid(row=0, column=2, padx=5, pady=5, sticky="nsew")
 
-    tk.Button(configuracionFrame, text="Modo Supervivencia", bg="dark orange",
-              command=seleccionar_modo_supervivencia) \
-        .grid(row=0, column=3, padx=5, pady=5, sticky="nsew")
+    # Sólo si hay al menos 2 jugadores mostramos Supervivencia
+    if numPlayers > 1:
+        tk.Button(configuracionFrame, text="Modo Supervivencia", bg="dark orange",
+                  command=seleccionar_modo_supervivencia) \
+            .grid(row=0, column=3, padx=5, pady=5, sticky="nsew")
 
 
 # Al seleccionar tiempo

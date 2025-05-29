@@ -792,34 +792,43 @@ def selectScenario():
 def sendScenario():
     global swarm, selectedMultiScenario, obstacles
 
-    if not selectedMultiScenario:
-        messagebox.showinfo("Error", "No hay escenario seleccionado.")
+    if not selectedMultiScenario or 'scenarios' not in selectedMultiScenario:
+        messagebox.showinfo("Error", "No hay escenario válido seleccionado.")
         return
 
-    # Agregar los obstáculos a cada subescenario
-    for scenario in selectedMultiScenario['scenarios']:
-        scenario['scenario'].extend(obstacles)
+    scenarios = selectedMultiScenario['scenarios']
 
-    # Función auxiliar para enviar el escenario a un dron
+    if not isinstance(scenarios, list) or len(scenarios) < len(swarm):
+        messagebox.showerror("Error", "La cantidad de escenarios no coincide con la cantidad de drones.")
+        return
+
+    # Agregar los obstáculos a cada subescenario (evitando duplicar)
+    for i, scenario in enumerate(scenarios):
+        if 'scenario' in scenario and isinstance(scenario['scenario'], list):
+            scenario['scenario'].extend(obstacles)
+        else:
+            print(f"[ADVERTENCIA] Escenario {i} mal formado. Se omitirá.")
+            continue
+
     def send_to_drone(idx):
         try:
-            swarm[idx].setScenario(selectedMultiScenario['scenarios'][idx]['scenario'])
+            if idx >= len(scenarios):
+                print(f"[ERROR] Índice {idx} fuera del rango de escenarios")
+                return
+            swarm[idx].setScenario(scenarios[idx]['scenario'])
         except Exception as e:
             print(f"Error al enviar escenario al dron {idx}: {e}")
 
     threads = []
-    # Enviar a cada dron en un hilo separado
     for i in range(len(swarm)):
         t = threading.Thread(target=send_to_drone, args=(i,), daemon=True)
         threads.append(t)
         t.start()
 
-    # Esperar (con timeout) a que todos los hilos terminen para no bloquear la interfaz indefinidamente
     for t in threads:
         t.join(timeout=10)
 
     sendBtn['bg'] = 'green'
-    # Mostrar las opciones de configuración y asignar zonas a cada jugador
     mostrar_configuracion_juego()
     assign_player_zones()
 
@@ -834,7 +843,7 @@ def mostrar_configuracion_juego():
     for widget in configuracionFrame.winfo_children():
         widget.destroy()
 
-    # --- Botones de tiempo y supervivencia ---
+    #  Botones de tiempo
     tk.Button(configuracionFrame, text="2 min", bg="dark orange",
               command=lambda: seleccionar_configuracion_tiempo(2)) \
         .grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
@@ -847,15 +856,16 @@ def mostrar_configuracion_juego():
               command=lambda: seleccionar_configuracion_tiempo(8)) \
         .grid(row=0, column=2, padx=5, pady=5, sticky="nsew")
 
-    tk.Button(configuracionFrame, text="Modo Supervivencia", bg="dark orange",
-              command=seleccionar_modo_supervivencia) \
-        .grid(row=0, column=3, padx=5, pady=5, sticky="nsew")
+    # Sólo si hay más de 1 jugador mostramos Supervivencia
+    if numPlayers > 1:
+        tk.Button(configuracionFrame, text="Modo Supervivencia", bg="dark orange",
+                  command=seleccionar_modo_supervivencia) \
+            .grid(row=0, column=3, padx=5, pady=5, sticky="nsew")
 
     # Si tenemos 4 jugadores, mostramos “2 vs 2”
     if numPlayers == 4:
         tk.Button(configuracionFrame, text="2 vs 2", bg="dark orange",
-                  command=seleccionar_tiempo_teams
-                  ) \
+                  command=seleccionar_tiempo_teams) \
             .grid(row=1, column=0, columnspan=2, padx=5, pady=5, sticky="nsew")
 
 
@@ -3091,9 +3101,22 @@ def endGame():
     displayResults()
     ventana.after(500, show_game_stats)
 
+    # Construye los resultados como ranking
+    results = {
+        'ranking': sorted(
+            [{'name': f'Jugador {pid + 1}', 'score': player_scores.get(pid, 0)}
+             for pid in player_scores],
+            key=lambda x: x['score'],
+            reverse=True
+        )
+    }
+
     sio_prof.emit(
         'endCompetition',
-        {'sessionId': session_id},
+        {
+            'sessionId': session_id,
+            'results': results
+        },
         namespace='/professor'
     )
 
@@ -3107,25 +3130,22 @@ def startGame():
     global game_clock_label, game_timer_running, game_elapsed_seconds
     global session_id
 
-    #  unir o crear sesión
     if session_id is None:
         session_id = askstring("Sesión", "Session ID para empezar la partida:")
         if not session_id:
             return
 
-        # los cuatro drones entran en /jocs
-        for color, client in dron_clients.items():
+        # Todos los drones se unen a la sesión
+        for color_key, client in dron_clients.items():
             client.emit('join', {'sessionId': session_id}, namespace='/jocs')
 
-        # profesor inicia la competición
-        sio_prof.emit('startCompetition', {'sessionId': session_id},
-                      namespace='/professor')
+        sio_prof.emit('startCompetition', {'sessionId': session_id}, namespace='/professor')
         print("startCompetition enviado")
 
-    #  estado interno
     eliminated_players.clear()
     initializePlayers(numPlayers)
 
+    # Despegan solo los jugadores realmente inicializados
     for player in players:
         swarm[player['id']].takeOff(5, blocking=False)
 
@@ -3133,21 +3153,18 @@ def startGame():
     startGameBtn['bg'] = 'green'
     mostrar_botones_cambio_dron()
     display_shooting_options()
-    controlButtonsFrame.grid(row=10, column=0, columnspan=3, padx=5, pady=5,
-                             sticky=tk.N + tk.E + tk.W)
+    controlButtonsFrame.grid(row=10, column=0, columnspan=3, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
 
-    timeBtn.grid (row=5, column=0, columnspan=4, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
+    timeBtn.grid(row=5, column=0, columnspan=4, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
     plotBtn.grid(row=6, column=0, columnspan=4, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
     statsBtn.grid(row=7, column=0, columnspan=4, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
 
     if game_clock_label is None:
-        game_clock_label = tk.Label(
-            mapaFrame, text="⏱ 00:00",
-            font=("Arial", 14, "bold"), fg="black", bg="white")
+        game_clock_label = tk.Label(mapaFrame, text="⏱ 00:00", font=("Arial", 14, "bold"), fg="black", bg="white")
         game_clock_label.place(x=1800, y=10)
 
     game_elapsed_seconds = 0
-    game_timer_running   = True
+    game_timer_running = True
     update_game_clock()
     mostrar_mini_tablas()
     recording_enabled = True
@@ -3155,30 +3172,53 @@ def startGame():
     if survival_mode:
         threading.Thread(target=survival_check_loop, daemon=True).start()
 
-    # enviar fences & obstáculos
-    seen_bboxes: set[tuple[float,float,float,float]] = set()
+    seen_bboxes: set[tuple[float, float, float, float]] = set()
 
-    for color_key, (email, _) in DRONS.items():
-        idx   = color_to_pid[color_key]
-        scene = selectedMultiScenario['scenarios'][idx]['scenario']
+    color_to_email = {
+        'rojo'    : 'dron_rojo1@upc.edu',
+        'azul'    : 'dron_azul1@upc.edu',
+        'verde'   : 'dron_verde1@upc.edu',
+        'amarillo': 'dron_amarillo1@upc.edu',
+    }
 
-        # fence de la zona de cada jugador
+    color_keys = list(dron_clients.keys())
+
+    scenarios = selectedMultiScenario.get('scenarios', [])
+    for player in players:
+        idx = player['id']  # 0,1,...
+        if idx < 0 or idx >= len(color_keys):
+            print(f"[ERROR] Índice de color inválido: {idx}")
+            continue
+
+        simple_color = color_keys[idx]  # p.ej. 'rojo'
+        email = color_to_email[simple_color]  # mapeo anterior
+
+        if idx >= len(scenarios):
+            print(f"[ERROR] No hay escenario #{idx} para {simple_color}")
+            continue
+
+        scene = scenarios[idx]['scenario']
+
+
+        # Envío del fence inicial
         area = scene[0]
-        dron_clients[color_key].emit(
+        dron_clients[simple_color].emit(
             'fence',
             {
                 'sessionId': session_id,
-                'drone'    : email,
+                'drone': email,
                 'fenceType': idx,
-                'geometry' : (area['waypoints']
-                              if area['type'] == "polygon"
-                              else {'lat': area['lat'], 'lon': area['lon'],
-                                    'radius': area['radius']}),
+                'geometry': (
+                    area['waypoints']
+                    if area['type'] == "polygon"
+                    else {'lat': area['lat'], 'lon': area['lon'], 'radius': area['radius']}
+                ),
                 'event': 'add'
             },
             namespace='/jocs'
         )
 
+        # Envío de obstáculos
         for obst in scene[1:]:
             bbox = _bbox_of_obstacle(obst)
             if bbox in seen_bboxes:
@@ -3192,14 +3232,14 @@ def startGame():
             )
             polys.append(poly)
 
-            dron_clients[color_key].emit(
+            dron_clients[simple_color].emit(
                 'obstacle',
                 {
                     'sessionId': session_id,
-                    'drone'    : email,
-                    'type'     : obst['type'],
-                    'geometry' : obst['waypoints'],
-                    'event'    : 'add'
+                    'drone': email,
+                    'type': obst['type'],
+                    'geometry': obst['waypoints'],
+                    'event': 'add'
                 },
                 namespace='/jocs'
             )

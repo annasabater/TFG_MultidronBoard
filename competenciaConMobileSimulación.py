@@ -843,7 +843,7 @@ def mostrar_configuracion_juego():
     for widget in configuracionFrame.winfo_children():
         widget.destroy()
 
-    # --- Botones de tiempo y supervivencia ---
+    #  Botones de tiempo
     tk.Button(configuracionFrame, text="2 min", bg="dark orange",
               command=lambda: seleccionar_configuracion_tiempo(2)) \
         .grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
@@ -856,15 +856,16 @@ def mostrar_configuracion_juego():
               command=lambda: seleccionar_configuracion_tiempo(8)) \
         .grid(row=0, column=2, padx=5, pady=5, sticky="nsew")
 
-    tk.Button(configuracionFrame, text="Modo Supervivencia", bg="dark orange",
-              command=seleccionar_modo_supervivencia) \
-        .grid(row=0, column=3, padx=5, pady=5, sticky="nsew")
+    # Sólo si hay más de 1 jugador mostramos Supervivencia
+    if numPlayers > 1:
+        tk.Button(configuracionFrame, text="Modo Supervivencia", bg="dark orange",
+                  command=seleccionar_modo_supervivencia) \
+            .grid(row=0, column=3, padx=5, pady=5, sticky="nsew")
 
     # Si tenemos 4 jugadores, mostramos “2 vs 2”
     if numPlayers == 4:
         tk.Button(configuracionFrame, text="2 vs 2", bg="dark orange",
-                  command=seleccionar_tiempo_teams
-                  ) \
+                  command=seleccionar_tiempo_teams) \
             .grid(row=1, column=0, columnspan=2, padx=5, pady=5, sticky="nsew")
 
 
@@ -3134,7 +3135,8 @@ def startGame():
         if not session_id:
             return
 
-        for color, client in dron_clients.items():
+        # Todos los drones se unen a la sesión
+        for color_key, client in dron_clients.items():
             client.emit('join', {'sessionId': session_id}, namespace='/jocs')
 
         sio_prof.emit('startCompetition', {'sessionId': session_id}, namespace='/professor')
@@ -3143,6 +3145,7 @@ def startGame():
     eliminated_players.clear()
     initializePlayers(numPlayers)
 
+    # Despegan solo los jugadores realmente inicializados
     for player in players:
         swarm[player['id']].takeOff(5, blocking=False)
 
@@ -3171,35 +3174,51 @@ def startGame():
 
     seen_bboxes: set[tuple[float, float, float, float]] = set()
 
-    for color_key, (email, _) in DRONS.items():
-        idx = color_to_pid.get(color_key)
-        if idx is None:
-            print(f"[ERROR] Color no encontrado: {color_key}")
+    color_to_email = {
+        'rojo'    : 'dron_rojo1@upc.edu',
+        'azul'    : 'dron_azul1@upc.edu',
+        'verde'   : 'dron_verde1@upc.edu',
+        'amarillo': 'dron_amarillo1@upc.edu',
+    }
+
+    color_keys = list(dron_clients.keys())
+
+    scenarios = selectedMultiScenario.get('scenarios', [])
+    for player in players:
+        idx = player['id']  # 0,1,...
+        if idx < 0 or idx >= len(color_keys):
+            print(f"[ERROR] Índice de color inválido: {idx}")
             continue
 
-        scenarios = selectedMultiScenario.get('scenarios', [])
+        simple_color = color_keys[idx]  # p.ej. 'rojo'
+        email = color_to_email[simple_color]  # mapeo anterior
 
-        if idx is None or idx >= len(scenarios):
-            print(f"[ERROR] Índice fuera de rango o color no encontrado: {color_key} -> idx={idx}")
+        if idx >= len(scenarios):
+            print(f"[ERROR] No hay escenario #{idx} para {simple_color}")
             continue
 
         scene = scenarios[idx]['scenario']
 
+
+        # Envío del fence inicial
         area = scene[0]
-        dron_clients[color_key].emit(
+        dron_clients[simple_color].emit(
             'fence',
             {
                 'sessionId': session_id,
                 'drone': email,
                 'fenceType': idx,
-                'geometry': (area['waypoints']
-                             if area['type'] == "polygon"
-                             else {'lat': area['lat'], 'lon': area['lon'], 'radius': area['radius']}),
+                'geometry': (
+                    area['waypoints']
+                    if area['type'] == "polygon"
+                    else {'lat': area['lat'], 'lon': area['lon'], 'radius': area['radius']}
+                ),
                 'event': 'add'
             },
             namespace='/jocs'
         )
 
+        # Envío de obstáculos
         for obst in scene[1:]:
             bbox = _bbox_of_obstacle(obst)
             if bbox in seen_bboxes:
@@ -3213,7 +3232,7 @@ def startGame():
             )
             polys.append(poly)
 
-            dron_clients[color_key].emit(
+            dron_clients[simple_color].emit(
                 'obstacle',
                 {
                     'sessionId': session_id,
