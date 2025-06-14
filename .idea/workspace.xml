@@ -5,12 +5,11 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="1da3c4dc-7240-4b2b-a745-1fcafd148539" name="Changes" comment="">
+      <change afterPath="$PROJECT_DIR$/competenciaConMobileReal_PROVA.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/competenciaConMobileReal_PROVA1.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/competenciaConMobile.py" beforeDir="false" afterPath="$PROJECT_DIR$/competenciaConMobile.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/competenciaConMobileReal.py" beforeDir="false" afterPath="$PROJECT_DIR$/competenciaConMobileReal.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/competenciaConMobileSimulación.py" beforeDir="false" afterPath="$PROJECT_DIR$/competenciaConMobileSimulación.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/competenciaConMobile_prova.py" beforeDir="false" afterPath="$PROJECT_DIR$/competenciaConMobile_prova.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/competenciaSinMobile.py" beforeDir="false" afterPath="$PROJECT_DIR$/competenciaSinMobile.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/dronLink/Dron.py" beforeDir="false" afterPath="$PROJECT_DIR$/dronLink/Dron.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -37,6 +36,8 @@
     &quot;Python.AutopilotControllerClass.executor&quot;: &quot;Run&quot;,
     &quot;Python.competenciaConMobile.executor&quot;: &quot;Run&quot;,
     &quot;Python.competenciaConMobileReal.executor&quot;: &quot;Run&quot;,
+    &quot;Python.competenciaConMobileReal_PROVA.executor&quot;: &quot;Run&quot;,
+    &quot;Python.competenciaConMobileReal_PROVA1.executor&quot;: &quot;Run&quot;,
     &quot;Python.competenciaConMobileSimulación.executor&quot;: &quot;Run&quot;,
     &quot;Python.competenciaConMobile_prova.executor&quot;: &quot;Run&quot;,
     &quot;Python.competenciaConMobile_prova1.executor&quot;: &quot;Run&quot;,
@@ -55,7 +56,7 @@
     &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
     &quot;git-widget-placeholder&quot;: &quot;main&quot;,
     &quot;last_opened_file_path&quot;: &quot;C:/Users/LENOVO/Desktop/EETAC/TFG/2. Codig/multidronBoard&quot;,
-    &quot;settings.editor.selected.configurable&quot;: &quot;preferences.lookFeel&quot;
+    &quot;settings.editor.selected.configurable&quot;: &quot;preferences.editor&quot;
   }
 }</component>
   <component name="RecentsManager">

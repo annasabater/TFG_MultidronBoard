@@ -3,6 +3,7 @@ class Dron(object):
     def __init__(self, id = None):
         print ("DronLink con Handlers")
         self.id = id
+        self.vehicle = None
 
         self.state = "disconnected"
         ''' los otros estados son:

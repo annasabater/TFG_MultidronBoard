@@ -19,7 +19,7 @@ from ParameterManager import ParameterManager
 from AutopilotControllerClass import AutopilotController
 from math import radians, sin, cos, sqrt, atan2
 from PIL import Image, ImageTk, ImageEnhance
-from shapely.geometry import Point, Polygon
+from shapely.geometry import Point, Polygon, LineString
 from shapely.affinity import rotate
 import os, sys, time, threading
 import requests
@@ -28,37 +28,67 @@ from dotenv import load_dotenv
 from tkinter.simpledialog import askstring
 global swarm
 import pygame
+from pymavlink import mavutil
+from shapely import affinity
+
+bullets_enabled = False
+scenario_ready = False
 
 try:
     swarm
 except NameError:
     swarm = []
 
+import pygame, threading
+
 pygame.init()
 pygame.joystick.init()
+players            = []
 
 num_joys = pygame.joystick.get_count()
-joys      = [pygame.joystick.Joystick(i) for i in range(num_joys)]
+joys     = [pygame.joystick.Joystick(i) for i in range(num_joys)]
 for j in joys:
     j.init()
-    print(f"Joystick {j.get_id()} → {j.get_name()} "
-          f"(axes={j.get_numaxes()}, buttons={j.get_numbuttons()})")
 
-joy_to_drone = {}
-_prev_btns   = {jid: [False,False,False] for jid in range(num_joys)}  # por mando
+# ── Mapeig **dinàmic**: joystick 0→dron 0, joystick 1→dron 1, … (màxim 4)
+joy_to_drone = {jid: jid for jid in range(min(num_joys, 4))}
 
-AX_R_H, AX_R_V, AX_L_H, AX_L_V = 0, 1, 2, 3
-BTN_SMALL, BTN_MED, BTN_BIG   = 0, 1, 2
-DEADZONE, STEP_GPS, STEP_ALT, STEP_YAW = 0.20, 5e-5, 0.10, 4
+
+# Buffer de estados anteriores por mando
+_prev_btns = {
+    jid: [False] * joy.get_numbuttons()
+    for jid, joy in enumerate(joys)
+}
+
+# Ejes confirmados tras debug:
+AX_L_H, AX_L_V = 0, 1     # Stick izquierdo: X=yaw, Y=throttle
+AX_R_H, AX_R_V = 2, 3     # Stick derecho:  X=roll, Y=pitch
+
+# ------------------------- Mapeig de botons Dual-Shock --------------------------
+# (indices → pygame) – coincideix amb la imatge adjunta
+BTN_LAND      = 0   # □   • Desarmar i aterrar
+BTN_GUIDED    = 1   # ✕   • Pas a GUIDED
+BTN_LOITER    = 2   # ○   • Pas a LOITER
+BTN_RTL       = 3   # △   • RTL
+BTN_IDENTIFY  = 4   # L1  • «Identify» (sempre actiu)
+
+# Bales  -----------------------             (només actius quan bullets_enabled = True)
+BTN_BIG       = 5   # R1  • Bala gran  (large_slow)
+BTN_MED       = 6   # L2  • Bala mitjana (medium)
+BTN_SMALL     = 7   # R2  • Bala petita (small_fast)
+
+BTN_ARMAR     = 8   # SELECT  • Arm
+BTN_DESPEGAR  = 9   # START   • Take-off 5 m
+# -------------------------------------------------------------------------------
+
+DEADZONE  = 0.05
+STEP_GPS  = 5e-5
+STEP_ALT  = 0.10
+STEP_YAW  = 4
+
 
 def _dz(v: float) -> float:
     return v if abs(v) >= DEADZONE else 0.0
-
-def _ensure_mapping():
-    global joy_to_drone
-    if not joy_to_drone and len(swarm):
-        n = min(num_joys, len(swarm))
-        joy_to_drone = {i: i for i in range(n)}
 
 def _set_yaw(dron, hdg: float):
     if hasattr(dron, "condition_yaw"):
@@ -66,47 +96,81 @@ def _set_yaw(dron, hdg: float):
     elif hasattr(dron, "setYaw"):
         dron.setYaw(hdg)
 
+# ─── AFEGEIX just abans de joystick_loop() ─────────────────────────────
+def _ready(dron) -> bool:
+    # True si hi ha vehicle, si està connectat i no és None
+    return getattr(dron, "vehicle", None) is not None
+
+# ─── acciones sobre el dron ────────────────────────────────────────────
+def _identify(d):
+    # Aquí lo que quieras: parpadeo de LEDs, mensaje, etc.
+    print(f"[{d}] identify")                 # DEBUG
+    # Ejemplo de MAV_CMD para encender LEDs, si tu firmware lo soporta:
+    # d.vehicle.mav.command_long_send(
+    #     d.vehicle.target_system, d.vehicle.target_component,
+    #     mavutil.mavlink.MAV_CMD_DO_SET_LED_CONTROL,
+    #     0, 255, 255, 255, 5, 0, 0, 0)
+
+def _arm(d):       d.arm()
+def _takeoff(d):   d.takeOff(5, blocking=False)
+def _rtl(d):       d.setFlightMode('RTL')
+def _loiter(d):    d.setFlightMode('LOITER')
+def _guided(d):    d.setFlightMode('GUIDED')
+
+
 def joystick_loop():
     clock = pygame.time.Clock()
+
     while True:
         pygame.event.pump()
-        _ensure_mapping()
 
         for jid, joy in enumerate(joys):
             drone_id = joy_to_drone.get(jid)
             if drone_id is None or drone_id >= len(swarm):
                 continue
-            dron      = swarm[drone_id]
+            dron = swarm[drone_id]
 
-            for btn, btype in ((BTN_SMALL,"small_fast"),
-                               (BTN_MED,  "medium"),
-                               (BTN_BIG,  "large_slow")):
-                pressed = joy.get_button(btn)
-                if pressed and not _prev_btns[jid][btn]:
-                    shoot(drone_id, btype)
-                _prev_btns[jid][btn] = pressed
+            # ----- botones “fijos” -----
+            button_actions = {
+                BTN_IDENTIFY: lambda d=dron: _identify(d) if _ready(d) else None,
+                BTN_ARMAR: lambda d=dron: _arm(d) if _ready(d) else None,
+                BTN_DESPEGAR: lambda d=dron: _takeoff(d) if _ready(d) else None,
+                BTN_RTL: lambda d=dron: _rtl(d) if _ready(d) else None,
+                BTN_LOITER: lambda d=dron: _loiter(d) if _ready(d) else None,
+                BTN_GUIDED: lambda d=dron: _guided(d) if _ready(d) else None,
+            }
 
-            rh, rv = _dz(joy.get_axis(AX_R_H)), _dz(joy.get_axis(AX_R_V))
+            # ----- disparos sólo si bullets_enabled -----
+            if bullets_enabled:
+                button_actions.update({
+                    BTN_BIG  : lambda: shoot(drone_id, "large_slow"),
+                    BTN_MED  : lambda: shoot(drone_id, "medium"),
+                    BTN_SMALL: lambda: shoot(drone_id, "small_fast"),
+                })
+
+            # detectamos flanco ↑
+            for b in range(joy.get_numbuttons()):
+                if joy.get_button(b) and not _prev_btns[jid][b]:
+                    act = button_actions.get(b)
+                    if act: act()
+                _prev_btns[jid][b] = joy.get_button(b)
+
+            # ----- sticks (yaw/throttle & roll/pitch) -----
             lh, lv = _dz(joy.get_axis(AX_L_H)), _dz(joy.get_axis(AX_L_V))
+            rh, rv = _dz(joy.get_axis(AX_R_H)), _dz(joy.get_axis(AX_R_V))
 
-            if rh or rv:                                 # traslación
-                lat, lon = dron.lat, dron.lon
+            if rh or rv:
                 mover_dron(dron,
-                           (lat + (-rv)*STEP_GPS, lon + rh*STEP_GPS),
+                           (dron.lat + (-rv)*STEP_GPS,
+                            dron.lon +   rh *STEP_GPS),
                            player_id=drone_id)
 
-            if lv:                                       # altitud
-                try:
-                    dron.goto(dron.lat, dron.lon,
-                              max(0, dron.alt + (-lv)*STEP_ALT))
-                except Exception as e:
-                    print(f"[{drone_id}] alt: {e}")
+            if lv:
+                dron.goto(dron.lat, dron.lon,
+                          max(0, dron.alt + (-lv)*STEP_ALT))
 
-            if lh:                                       # yaw
-                try:
-                    _set_yaw(dron, (dron.heading + lh*STEP_YAW) % 360)
-                except Exception as e:
-                    print(f"[{drone_id}] yaw: {e}")
+            if lh:
+                _set_yaw(dron, (dron.heading + lh*STEP_YAW) % 360)
 
         clock.tick(40)
 
@@ -876,50 +940,167 @@ def selectScenario():
     drawScenario(selectedMultiScenario)
     sendBtn['state'] = tk.NORMAL
 
+# ---------- helpers GEOFENCE  /  MISSION-PLANNER ------------------------------
 
-# envia los datos del multi escenario seleccionado al enjambre
-def sendScenario():
-    global swarm, selectedMultiScenario, obstacles
-
-    if not selectedMultiScenario or 'scenarios' not in selectedMultiScenario:
-        messagebox.showinfo("Error", "No hay escenario válido seleccionado.")
-        return
-
-    scenarios = selectedMultiScenario['scenarios']
-
-    if not isinstance(scenarios, list) or len(scenarios) < len(swarm):
-        messagebox.showerror("Error", "La cantidad de escenarios no coincide con la cantidad de drones.")
-        return
-
-    # Agregar los obstáculos a cada subescenario (evitando duplicar)
-    for i, scenario in enumerate(scenarios):
-        if 'scenario' in scenario and isinstance(scenario['scenario'], list):
-            scenario['scenario'].extend(obstacles)
+def scenario_to_polygons(scn: list[dict]) -> list[list[tuple[float, float]]]:
+    """
+    Convierte la lista de fences de *scenario* (polígonos o círculos) en
+    una lista de polígonos puros [(lat,lon), …].
+    El primer polígono será «inclusión» y los siguientes «exclusión».
+    """
+    polys = []
+    for fence in scn:
+        if fence['type'] == 'polygon':
+            pts = [(wp['lat'], wp['lon']) for wp in fence['waypoints']]
+        elif fence['type'] == 'circle':
+            # 36 lados ≃ 10°
+            pts = getCircle(fence['lat'], fence['lon'], fence['radius'])
         else:
-            print(f"[ADVERTENCIA] Escenario {i} mal formado. Se omitirá.")
             continue
+        polys.append(pts)
+    return polys
 
-    def send_to_drone(idx):
-        try:
-            if idx >= len(scenarios):
-                print(f"[ERROR] Índice {idx} fuera del rango de escenarios")
-                return
-            swarm[idx].setScenario(scenarios[idx]['scenario'])
-        except Exception as e:
-            print(f"Error al enviar escenario al dron {idx}: {e}")
 
-    threads = []
+
+# ------------------------------------------------------------------ helpers --
+def _param_set(mav, name: str, value, ptype):
+    """
+    Envía un PARAM_SET y espera (opcional) la confirmación.
+    mav ............. conexión mavutil (tcp, serial…)
+    name ............ nombre del parámetro (str)
+    value ........... valor (int o float)
+    ptype ........... mavutil.mavlink.MAV_PARAM_TYPE_*
+    """
+    mav.mav.param_set_send(
+        mav.target_system,
+        mav.target_component,
+        name.encode(),
+        float(value),
+        ptype
+    )
+    # esperamos 2 s el PARAM_VALUE de eco (sin filtrar por param_id)
+    mav.recv_match(type='PARAM_VALUE', blocking=True, timeout=2)
+
+# ----------------------------------------------------------- geofence params --
+def setup_fence_params(dron):
+    m = dron.vehicle  # conexión mavutil
+
+    try:
+        _param_set(m, 'FENCE_ENABLE', 1, mavutil.mavlink.MAV_PARAM_TYPE_INT32)  # valla ON
+        _param_set(m, 'FENCE_TYPE', 3, mavutil.mavlink.MAV_PARAM_TYPE_INT32)  # 3 = polígono
+        _param_set(m, 'FENCE_ACTION', 1, mavutil.mavlink.MAV_PARAM_TYPE_INT32)  # 1 = RTL
+        _param_set(m, 'FENCE_ALT_MAX', 120, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)  # techo
+
+        # ➜ nuevo parámetro:
+        _param_set(m, 'FENCE_MARGIN', 5, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)  # 5 m
+
+        print(f"[{dron}] parámetros FENCE_* enviados")
+    except Exception as e:
+        print(f"[{dron}] setup_fence_params: {e}")
+
+
+# ------------------------------------------------------------ subir polígonos --
+# --- NUEVA VERSIÓN upload_fence_to_fc -------------------------------
+def upload_fence_to_fc(dron, polygons):
+    """
+    polygons  ->  [ [(lat,lon),…] ,  # 1º = inclusión
+                    [(lat,lon),…] ,  # 2º = exclusión
+                    … ]
+    """
+    m = dron.vehicle
+    total = sum(len(p) for p in polygons)
+
+    # (1) fijar número total de vértices
+    _param_set(m, 'FENCE_TOTAL', total,
+               mavutil.mavlink.MAV_PARAM_TYPE_INT32)
+
+    # (2) enviar cada polígono por separado
+    for poly in polygons:
+        cnt = len(poly)
+        for idx, (lat, lon) in enumerate(poly):
+            m.mav.fence_point_send(
+                m.target_system,
+                m.target_component,
+                idx,        # 0 en el primer vértice del polígono
+                cnt,        # SIEMPRE “nº de vértices de *este* polígono”
+                lat,
+                lon
+            )
+            time.sleep(0.05)          # aligera el tráfico MAVLink
+
+
+
+def load_first_competition(n_players: int):
+    """Devuelve el primer *.json de ./competencia que termine en _{n_players}.json."""
+    patron = os.path.join("competencia", f"*_{n_players}.json")
+    archivos = glob.glob(patron)
+    if not archivos:
+        return None
+    with open(archivos[0], "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def sendCircuit():
+    """
+    Envía el escenario que está cargado (single o multi) a TODOS los drones.
+    - Si todavía no hay selección, intenta abrir automáticamente el primer
+      archivo en ./competencia que coincida con *_{numPlayers}.json
+    """
+    global swarm, scenario, selectedMultiScenario, numPlayers, obstacles
+
+    # ------------------------------------------------------------------
+    # 1) Nos aseguramos de tener algo que mandar
+    # ------------------------------------------------------------------
+    if not scenario and not selectedMultiScenario:
+        selectedMultiScenario = load_first_competition(numPlayers)
+
+    if selectedMultiScenario:                         # === multi-escenario ===
+        scenarios = selectedMultiScenario.get('scenarios', [])
+        if len(scenarios) < len(swarm):
+            messagebox.showerror("Error",
+                                 "El .json tiene menos escenarios que drones.")
+            return
+    elif scenario:                                    # === circuito simple ===
+        scenarios = [{'scenario': scenario}]
+    else:
+        messagebox.showinfo("Error", "No hay circuito preparado para enviar.")
+        return
+
+    # Añadimos obstáculos creados a mano
+    for sc in scenarios:
+        sc['scenario'].extend(obstacles)
+
+    # ------------------------------------------------------------------
+    # 2) Configuramos cada dron en paralelo
+    # ------------------------------------------------------------------
+    def configure(idx: int):
+        dron   = swarm[idx]
+        sc     = scenarios[idx if len(scenarios) > 1 else 0]['scenario']
+
+        setup_fence_params(dron)                      # parámetros FC
+        polys = scenario_to_polygons(sc)              # polígonos puros
+        upload_fence_to_fc(dron, polys)               # subida geofence
+        dron.setScenario(sc)                          # lógica estación de tierra
+
+
+    hilos = []
     for i in range(len(swarm)):
-        t = threading.Thread(target=send_to_drone, args=(i,), daemon=True)
-        threads.append(t)
-        t.start()
+        th = threading.Thread(target=configure, args=(i,), daemon=True)
+        hilos.append(th)
+        th.start()
+        time.sleep(0.2)                               # suaviza tráfico MAVLink
+    for th in hilos:
+        th.join(timeout=10)
 
-    for t in threads:
-        t.join(timeout=10)
-
+    # ------------------------------------------------------------------
     sendBtn['bg'] = 'green'
+    assign_player_zones()           # si ya la usabas
     mostrar_configuracion_juego()
-    assign_player_zones()
+    global bullets_enabled
+    bullets_enabled = True  # ja es pot disparar
+    global scenario_ready
+    scenario_ready = True
+    messagebox.showinfo("Escenario enviado",
+                        "Geofence y escenario configurados en todos los drones.")
 
 
 # configuración del frame con los botones 2 min, 5 min, 8 min y supervivencia
@@ -1107,19 +1288,30 @@ def punto_dentro_poligono(point, polygon):
 
 
 def mover_dron(dron, nueva_pos, player_id=None):
-    # Si el dron no está "active", no se mueve
-    if players[player_id]['status'] != 'active':
-        print(f"El dron {player_id} está en estado {players[player_id]['status']} y no puede moverse.")
+    # ──────────── 1) si encara no hi ha llista de jugadors ─────────────
+    if player_id is None or player_id >= len(players):
+        # Encara estem abans de startGame → permetem moviment lliure
+        dron.goto(nueva_pos[0], nueva_pos[1], 5)
         return
 
-    if verificar_colision(nueva_pos, player_id):
-        print(f"Jugador {player_id} intenta passar per un obstacle. Tornant a la posició anterior.")
-        if player_id in last_valid_positions:
-            prev_pos = last_valid_positions[player_id]
-            dron.goto(prev_pos[0], prev_pos[1], 5)
+    # ──────────── 2) estat del jugador (després de startGame) ──────────
+    if players[player_id]['status'] != 'active':
+        print(f"El dron {player_id} està en estat {players[player_id]['status']} i no pot moure’s.")
         return
+
+    # ──────────── 3) col·lisions o fugides ─────────────────────────────
+    if scenario_ready:                      # <─ només quan ja hi ha geofence
+        if verificar_colision(nueva_pos, player_id):
+            print(f"Jugador {player_id} intenta passar per un obstacle. Tornant a la posició anterior.")
+            if player_id in last_valid_positions:
+                prev_pos = last_valid_positions[player_id]
+                dron.goto(prev_pos[0], prev_pos[1], 5)
+            return
+
+    # ──────────── 4) moviment acceptat ─────────────────────────────────
     dron.goto(nueva_pos[0], nueva_pos[1], 5)
     last_valid_positions[player_id] = nueva_pos
+
 
 
 #Devuelve el obstáculo en 'pos' si 'pos' está dentro de su polígono, o None si no hay obstáculo ahí
@@ -1323,10 +1515,6 @@ def fence_to_polygon(fence):
         return Polygon(coords)
     else:
         return None
-
-import math
-from shapely.geometry import Polygon, LineString
-from shapely import affinity
 
 def mirror_obstacle_center_to_center(obstacle, red_poly, blue_poly):
 
@@ -1594,29 +1782,26 @@ def mirror_and_rotate_obstacle_shapely(obstacle, base_fence, target_fence, angle
         lat = wp['lat']
         lon = wp['lon']
 
-        # Posición normalizada en la zona base (0..1)
         rel_lat = (lat - base_bbox['min_lat']) / (base_bbox['max_lat'] - base_bbox['min_lat'] + 1e-12)
         rel_lon = (lon - base_bbox['min_lon']) / (base_bbox['max_lon'] - base_bbox['min_lon'] + 1e-12)
 
-        # Reflejamos en el eje horizontal => invertimos 'lon'
         new_lat = target_bbox['min_lat'] + rel_lat * (target_bbox['max_lat'] - target_bbox['min_lat'])
         new_lon = target_bbox['max_lon'] - rel_lon * (target_bbox['max_lon'] - target_bbox['min_lon'])
 
         mirrored_coords.append( (new_lon, new_lat) )  # en shapely: (x, y)=(lon, lat)
 
-    # 2) Crear polígono shapely a partir de mirrored_coords
+    # Crear polígono shapely a partir de mirrored_coords
     poly_mirrored = Polygon(mirrored_coords)
 
-    # 3) Rotar -20° (en grados; origin='centroid' o un punto X)
-    #  Nota: Con shapely, rotate(geom, angle, use_radians=False) rota en sentido antihorario.
+    # Rotar -20°
     rotated_poly = rotate(poly_mirrored, angle_deg, origin='centroid', use_radians=False)
 
-    # 4) Extraer las coords finales en formato lat/lon
+    # Extraer las coords finales en formato lat/lon
     final_waypoints = []
     for (x, y) in rotated_poly.exterior.coords:
         final_waypoints.append({'lat': y, 'lon': x})
 
-    # 5) Construir el nuevo obstáculo
+    # Construir el nuevo obstáculo
     new_obstacle = {
         'type': 'polygon',
         'waypoints': final_waypoints,
@@ -1910,6 +2095,7 @@ def crear_ventana():
     global gameModeFrame
     global dronPictures, dronLittlePictures, dronLandedPictures, colors, map_widget, dronIcons
     global bullet_small_image, bullet_medium_image, bullet_large_image
+    global timeBtn, plotBtn, statsBtn
 
     playersCount = 0
     connected = False
@@ -1941,11 +2127,9 @@ def crear_ventana():
     ventana.bind("<Right>", lambda e: mover_dron_teclado("derecha"))
     ventana.bind("<space>", lambda e: disparar_con_teclado())
 
-    # controlFrame = tk.LabelFrame(ventana, text = 'Control')
     controlFrame = tk.LabelFrame(ventana, text='Control', font=("Arial", 8, "bold"))
     controlFrame.grid(row=0, column=0, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
 
-    # El frame de control aparece en la primera columna
     controlFrame.rowconfigure(0, weight=1)
     controlFrame.rowconfigure(1, weight=1)
     controlFrame.columnconfigure(0, weight=1)
@@ -2113,13 +2297,14 @@ def crear_ventana():
 
     def ask_Ports():
         global comPorts
+        global timeBtn, plotBtn, statsBtn
         comPorts = askstring('Puertos', "Indica los puertos COM separados por comas (por ejemplo: 'COM3,COM21,COM7')")
 
     option2 = tk.Radiobutton(connectFrame, text="Producción", variable=connectOption, value="Production",
                              command=ask_Ports)
     option2.grid(row=1, column=1, padx=5, pady=3, sticky=tk.N + tk.S + tk.W)
 
-    sendBtn = tk.Button(selectFrame, text="Enviar escenario", bg="dark orange", command=sendScenario)
+    sendBtn = tk.Button(selectFrame, text="Enviar escenario", bg="dark orange", command=sendCircuit)
     sendBtn.grid(row=6, column=0, columnspan=4, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
 
     deleteBtn = tk.Button(selectFrame, text="Eliminar escenario", bg="red", fg='white', command=deleteScenario)
@@ -2136,14 +2321,19 @@ def crear_ventana():
     superviseFrame.columnconfigure(2, weight=1)
     superviseFrame.columnconfigure(3, weight=1)
 
-    global timeBtn, plotBtn, statsBtn
-
+    # crea los tres botones y los coloca
     timeBtn = tk.Button(superviseFrame, text="Ver Distancia de Vuelo", bg="dark orange", command=showFlightDistances)
-    plotBtn = tk.Button(superviseFrame, text="Informe Visual", bg="dark orange", command=plotFlightReport)
-    statsBtn = tk.Button(superviseFrame, text="Mostrar Estadísticas", bg="dark orange", command=show_game_stats)
+    timeBtn.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
 
+    plotBtn = tk.Button(superviseFrame, text="Informe Visual", bg="dark orange", command=plotFlightReport)
+    plotBtn.grid(row=1, column=0, padx=5, pady=5, sticky="nsew")
+
+    statsBtn = tk.Button(superviseFrame, text="Mostrar Estadísticas", bg="dark orange", command=show_game_stats)
+    statsBtn.grid(row=2, column=0, padx=5, pady=5, sticky="nsew")
+
+    # luego el resto de controles
     parametersBtn = tk.Button(superviseFrame, text="Ajustar parámetros", bg="dark orange", command=adjustParameters)
-    parametersBtn.grid(row=0, column=0, columnspan=4, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
+    parametersBtn.grid(row=3, column=0, columnspan=4, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
 
     controlesFrame = tk.LabelFrame(superviseFrame, text='Controles')
     controlesFrame.grid(row=1, column=0, columnspan=4, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
@@ -2171,9 +2361,8 @@ def crear_ventana():
     showQRBtn.grid(row=3, column=0, columnspan=4, padx=5, pady=5, sticky=tk.N + tk.E + tk.W)
 
     #################### Frame para el mapa, en la columna de la derecha #####################
-    # mapaFrame = tk.LabelFrame(ventana, text='Mapa')
-    mapaFrame = tk.LabelFrame(ventana, text='Mapa', font=("Arial", 8, "bold"))
 
+    mapaFrame = tk.LabelFrame(ventana, text='Mapa', font=("Arial", 8, "bold"))
     mapaFrame.grid(row=0, column=1, padx=5, pady=5, sticky=tk.N + tk.S + tk.E + tk.W)
     mapaFrame.rowconfigure(0, weight=1)
     mapaFrame.rowconfigure(1, weight=1)
@@ -2182,8 +2371,7 @@ def crear_ventana():
     # creamos el widget para el mapa
     map_widget = tkintermapview.TkinterMapView(mapaFrame, width=1900, height=1350, corner_radius=0)
     map_widget.grid(row=1, column=0, padx=5, pady=5)
-    map_widget.set_tile_server("https://mt0.google.com/vt/lyrs=s&hl=en&x={x}&y={y}&z={z}&s=Ga",
-                               max_zoom=24)
+    map_widget.set_tile_server("https://mt0.google.com/vt/lyrs=s&hl=en&x={x}&y={y}&z={z}&s=Ga", max_zoom=24)
     map_widget.set_position(41.2764478, 1.9886568)  # Coordenadas del dronLab
     map_widget.set_zoom(21)
 
@@ -3193,6 +3381,7 @@ def startGame():
     global players, eliminated_players, recording_enabled
     global game_clock_label, game_timer_running, game_elapsed_seconds
     global session_id
+    bullets_enabled = True  # habilitamos 5-6-7 tan pronto empieza la partida
 
     if session_id is None:
         session_id = askstring("Sesión", "Session ID para empezar la partida:")
@@ -3347,12 +3536,8 @@ def processTelemetryInfo(pid: int, info: dict):
     last_valid_positions[pid] = pos
 
     if not dronIcons[pid]:
-        dronIcons[pid]    = map_widget.set_marker(lat, lon,
-                                                  icon=dronPictures[pid],
-                                                  icon_anchor="center")
-        frontMarkers[pid] = map_widget.set_marker(lat, lon,
-                                                  icon=dronLittlePictures[pid],
-                                                  icon_anchor="center")
+        dronIcons[pid]    = map_widget.set_marker(lat, lon, icon=dronPictures[pid], icon_anchor="center")
+        frontMarkers[pid] = map_widget.set_marker(lat, lon, icon=dronLittlePictures[pid], icon_anchor="center")
     else:
         dronIcons[pid].set_position(lat, lon)
 
@@ -3505,7 +3690,7 @@ def destroy_obstacle(obstacle: dict, remover_id: int = 0) -> None:
     bbox = get_bbox(obstacle)              # (minx, miny, maxx, maxy)
     _removed_bboxes.add(bbox)              # ← lo marcamos como destruido
 
-    # — 1. borrar TODOS los polígonos idénticos del mapa
+    # borrar TODOS los polígonos idénticos del mapa
     for poly in polys[:]:
         try:
             if get_bbox({
@@ -3517,14 +3702,20 @@ def destroy_obstacle(obstacle: dict, remover_id: int = 0) -> None:
         except Exception:
             pass
 
-    # — 2. borrar TODAS las copias de la lista obstacles
+    # borrar TODAS las copias de la lista obstacles
     obstacles[:] = [obs for obs in obstacles if get_bbox(obs) != bbox]
 
-    # — 3. idem dentro del escenario cargado
+    # idem dentro del escenario cargado
     for scn in selectedMultiScenario.get('scenarios', []):
         scn['scenario'][:] = [obs for obs in scn['scenario'] if get_bbox(obs) != bbox]
 
-    # — 4. avisar por websocket (una sola vez basta)
+    for i, dron in enumerate(swarm):
+        # ‘scenario’ del jugador i SIN el obstáculo eliminado
+        scn = selectedMultiScenario['scenarios'][i]['scenario']
+        polys = scenario_to_polygons(scn)
+        upload_fence_to_fc(dron, polys)
+
+    # avisar por websocket (una sola vez basta)
     color = color_of_id(remover_id)
     email = email_of_id(remover_id)
     dron_clients[color].emit(
@@ -3665,6 +3856,6 @@ if __name__ == "__main__":
     setupControlButtons()
     ventana.mainloop()
 
-    sio_prof.disconnect(namespace='/professor')
+    sio_prof.disconnect()
     for c in dron_clients.values():
-        c.disconnect(namespace='/jocs')
+        c.disconnect()
