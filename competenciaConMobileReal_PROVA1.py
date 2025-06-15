@@ -1,3 +1,7 @@
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
 import json
 import math
 import random
@@ -64,22 +68,20 @@ _prev_btns = {
 AX_L_H, AX_L_V = 0, 1     # Stick izquierdo: X=yaw, Y=throttle
 AX_R_H, AX_R_V = 2, 3     # Stick derecho:  X=roll, Y=pitch
 
-# ------------------------- Mapeig de botons Dual-Shock --------------------------
-# (indices → pygame) – coincideix amb la imatge adjunta
-BTN_LAND      = 0   # □   • Desarmar i aterrar
-BTN_GUIDED    = 1   # ✕   • Pas a GUIDED
-BTN_LOITER    = 2   # ○   • Pas a LOITER
-BTN_RTL       = 3   # △   • RTL
-BTN_IDENTIFY  = 4   # L1  • «Identify» (sempre actiu)
 
-# Bales  -----------------------             (només actius quan bullets_enabled = True)
-BTN_BIG       = 5   # R1  • Bala gran  (large_slow)
-BTN_MED       = 6   # L2  • Bala mitjana (medium)
-BTN_SMALL     = 7   # R2  • Bala petita (small_fast)
+BTN_LAND      = 0   # Desarmar i aterrar
+BTN_GUIDED    = 1   # GUIDED
+BTN_LOITER    = 2   # LOITER
+BTN_RTL       = 3   # RTL
+BTN_IDENTIFY  = 4   # Identify (sempre actiu)
 
-BTN_ARMAR     = 8   # SELECT  • Arm
-BTN_DESPEGAR  = 9   # START   • Take-off 5 m
-# -------------------------------------------------------------------------------
+# Bales
+BTN_BIG       = 5   # Bala gran  (large_slow)
+BTN_MED       = 6   # Bala mitjana (medium)
+BTN_SMALL     = 7   # Bala petita (small_fast)
+
+BTN_ARMAR     = 8   # Arm
+BTN_DESPEGAR  = 9   # Take-off 5 m
 
 DEADZONE  = 0.05
 STEP_GPS  = 5e-5
@@ -96,20 +98,13 @@ def _set_yaw(dron, hdg: float):
     elif hasattr(dron, "setYaw"):
         dron.setYaw(hdg)
 
-# ─── AFEGEIX just abans de joystick_loop() ─────────────────────────────
 def _ready(dron) -> bool:
-    # True si hi ha vehicle, si està connectat i no és None
     return getattr(dron, "vehicle", None) is not None
 
-# ─── acciones sobre el dron ────────────────────────────────────────────
+# Acciones sobre el dron
 def _identify(d):
-    # Aquí lo que quieras: parpadeo de LEDs, mensaje, etc.
-    print(f"[{d}] identify")                 # DEBUG
-    # Ejemplo de MAV_CMD para encender LEDs, si tu firmware lo soporta:
-    # d.vehicle.mav.command_long_send(
-    #     d.vehicle.target_system, d.vehicle.target_component,
-    #     mavutil.mavlink.MAV_CMD_DO_SET_LED_CONTROL,
-    #     0, 255, 255, 255, 5, 0, 0, 0)
+    print(f"[{d}] identify")
+
 
 def _arm(d):       d.arm()
 def _takeoff(d):   d.takeOff(5, blocking=False)
@@ -130,7 +125,7 @@ def joystick_loop():
                 continue
             dron = swarm[drone_id]
 
-            # ----- botones “fijos” -----
+            #  botones “fijos”
             button_actions = {
                 BTN_IDENTIFY: lambda d=dron: _identify(d) if _ready(d) else None,
                 BTN_ARMAR: lambda d=dron: _arm(d) if _ready(d) else None,
@@ -140,7 +135,7 @@ def joystick_loop():
                 BTN_GUIDED: lambda d=dron: _guided(d) if _ready(d) else None,
             }
 
-            # ----- disparos sólo si bullets_enabled -----
+            #  disparos sólo si bullets_enabled
             if bullets_enabled:
                 button_actions.update({
                     BTN_BIG  : lambda: shoot(drone_id, "large_slow"),
@@ -148,14 +143,14 @@ def joystick_loop():
                     BTN_SMALL: lambda: shoot(drone_id, "small_fast"),
                 })
 
-            # detectamos flanco ↑
+            # detectamos flanco
             for b in range(joy.get_numbuttons()):
                 if joy.get_button(b) and not _prev_btns[jid][b]:
                     act = button_actions.get(b)
                     if act: act()
                 _prev_btns[jid][b] = joy.get_button(b)
 
-            # ----- sticks (yaw/throttle & roll/pitch) -----
+            # sticks (yaw/throttle & roll/pitch)
             lh, lv = _dz(joy.get_axis(AX_L_H)), _dz(joy.get_axis(AX_L_V))
             rh, rv = _dz(joy.get_axis(AX_R_H)), _dz(joy.get_axis(AX_R_V))
 
@@ -179,20 +174,31 @@ if num_joys:
 else:
     print("Jugando sin joystick (flechas, espacio o la app móvil).")
 
-
 session_id = None
 
-load_dotenv()
+ENV = "local"
+print(f"[INFO] Entorn fixat a {ENV.upper()}")
 
-BASE_URL = os.getenv("SERVER_URL", "http://localhost:9000").rstrip("/")
-IS_HTTPS = BASE_URL.startswith("https")
-API_URL  = f"{BASE_URL}/api"
+# carreguem el fitxer adequat
+env_file = ".env.local" if ENV == "local" else ".env.prod"
+if not load_dotenv(env_file, override=True):
+    sys.exit(f"No s'ha trobat {env_file}")
+
+# variables Globals
+BASE_URL   = os.getenv("SERVER_URL", "https://ea2-api.upc.edu/").rstrip("/")
+
+# http://localhost:9000
+# https://ea2-api.upc.edu/
+
+VERIFY_SSL = os.getenv("VERIFY_SSL", "true").lower() == "true"
+IS_HTTPS   = BASE_URL.startswith("https")
+print(f"[INFO] {ENV.upper()}  →  {BASE_URL}")
+
+API_URL = f"{BASE_URL}/api"
 
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 if not ADMIN_KEY:
     sys.exit("Falta ADMIN_KEY")
-
-
 
 PLAYER_COLORS  = ['rojo', 'azul', 'verde', 'amarillo']
 PLAYER_EMAILS  = [os.getenv(f'DRON_{c.upper()}_EMAIL') for c in PLAYER_COLORS]
@@ -205,18 +211,20 @@ def email_of_id(id):          # 0-3 → dron_rojo1@upc.edu …
 
 
 def login(email: str, password: str) -> str:
-    r = requests.post(
-        f"{API_URL}/auth/login",
-        json={"email": email, "password": password},
-        verify=IS_HTTPS          # True si és https, False si és http
-    )
-    r.raise_for_status()
+    r = requests.post(f"{API_URL}/auth/login",
+                      json={"email": email, "password": password},
+                      verify=VERIFY_SSL)
+    if r.status_code != 200:
+        print("Login failed:", r.status_code, r.text)
+        r.raise_for_status()
     return r.json()["accesstoken"]
 
-
-
-# --- crea un cliente socket para el profesor ---
-sio_prof = socketio.Client(logger=False, engineio_logger=False)
+#  cliente socket para el profesor
+sio_prof = socketio.Client(
+    logger=False,
+    engineio_logger=False,
+    ssl_verify=VERIFY_SSL
+)
 
 @sio_prof.event(namespace='/professor')
 def connect():
@@ -228,35 +236,35 @@ def connect_error(data):
 
 try:
     sio_prof.connect(
-        BASE_URL,  # http → ws   |   https → wss
+        BASE_URL,
         transports=["websocket"],
         namespaces=["/professor"],
-        auth={"/professor": {"key": ADMIN_KEY}},
-        ssl_verify=IS_HTTPS  # =True en prod, False en local
+        auth={"/professor": {"key": ADMIN_KEY}}
     )
-
 except Exception as e:
     print("No pude conectar a /professor:", e)
     sys.exit(1)
 
+
 def make_dron_client(color, token):
-    sio = socketio.Client(logger=False, engineio_logger=False)
+    sio = socketio.Client(
+        logger=False,
+        engineio_logger=False,
+        ssl_verify=VERIFY_SSL
+    )
 
     @sio.event(namespace='/jocs')
     def connect():
         print(f"🔌 Dron {color} conectado a /jocs")
 
-    # Nuevo handler para recibir actualizaciones de estado
     @sio.on('state_update', namespace='/jocs')
     def on_state_update(data):
-        # data = { drone: "dron_rojo1@upc.edu", action, payload, by }
         if data.get('drone') != os.getenv(f"DRON_{color.upper()}_EMAIL"):
-            return  # no es para este dron
+            return
         action  = data['action']
         payload = data.get('payload', {})
 
         pid = color_to_pid[color]
-        # Mover
         if action == 'move':
             dx, dy = payload['dx'], payload['dy']
             lat, lon = positions[color]
@@ -264,22 +272,18 @@ def make_dron_client(color, token):
             new_lon = lon + dx * 0.00005
             positions[color] = (new_lat, new_lon)
             mover_dron(swarm[pid], (new_lat, new_lon), player_id=pid)
-        # Disparar
         elif action == 'fire':
             btype = payload.get('type', 'medium')
             shoot(pid, btype)
-        #else:
-           # print(f"Acción desconocida en Python: {action}")
 
+    # Conectamos
     sio.connect(
-    BASE_URL,
-    auth={"token": token},
-    transports=["websocket"],
-    namespaces=["/jocs"],
-    ssl_verify=IS_HTTPS
-)
+        BASE_URL,
+        transports=["websocket"],
+        namespaces=["/jocs"],
+        auth={"token": token}
+    )
     return sio
-
 
 DRONS = {
     'rojo':     (os.getenv('DRON_ROJO_EMAIL'),     os.getenv('DRON_ROJO_PASSWORD')),
@@ -292,7 +296,7 @@ dron_clients = {}
 
 for color, (email, pwd) in DRONS.items():
     if not email or not pwd:
-        print(f"Falta email/password para dron {color} en .env")
+        print(f"Falta email/password para dron {color} en .env.local")
         sys.exit(1)
     token = login(email, pwd)
     dron_clients[color] = make_dron_client(color, token)
@@ -1028,17 +1032,16 @@ def upload_fence_to_fc(dron, polygons):
             m.mav.fence_point_send(
                 m.target_system,
                 m.target_component,
-                idx,        # 0 en el primer vértice del polígono
-                cnt,        # SIEMPRE “nº de vértices de *este* polígono”
+                idx,
+                cnt,
                 lat,
                 lon
             )
-            time.sleep(0.05)          # aligera el tráfico MAVLink
+            time.sleep(0.05) # aligera el tráfico MAVLink
 
 
 
 def load_first_competition(n_players: int):
-    """Devuelve el primer *.json de ./competencia que termine en _{n_players}.json."""
     patron = os.path.join("competencia", f"*_{n_players}.json")
     archivos = glob.glob(patron)
     if not archivos:
@@ -1046,17 +1049,10 @@ def load_first_competition(n_players: int):
     with open(archivos[0], "r", encoding="utf-8") as f:
         return json.load(f)
 
+
 def sendCircuit():
-    """
-    Envía el escenario que está cargado (single o multi) a TODOS los drones.
-    - Si todavía no hay selección, intenta abrir automáticamente el primer
-      archivo en ./competencia que coincida con *_{numPlayers}.json
-    """
     global swarm, scenario, selectedMultiScenario, numPlayers, obstacles
 
-    # ------------------------------------------------------------------
-    # 1) Nos aseguramos de tener algo que mandar
-    # ------------------------------------------------------------------
     if not scenario and not selectedMultiScenario:
         selectedMultiScenario = load_first_competition(numPlayers)
 
@@ -1066,48 +1062,41 @@ def sendCircuit():
             messagebox.showerror("Error",
                                  "El .json tiene menos escenarios que drones.")
             return
-    elif scenario:                                    # === circuito simple ===
+    elif scenario:
         scenarios = [{'scenario': scenario}]
     else:
         messagebox.showinfo("Error", "No hay circuito preparado para enviar.")
         return
 
-    # Añadimos obstáculos creados a mano
+    # Añadimos obstáculos
     for sc in scenarios:
         sc['scenario'].extend(obstacles)
 
-    # ------------------------------------------------------------------
-    # 2) Configuramos cada dron en paralelo
-    # ------------------------------------------------------------------
     def configure(idx: int):
         dron   = swarm[idx]
         sc     = scenarios[idx if len(scenarios) > 1 else 0]['scenario']
 
-        setup_fence_params(dron)                      # parámetros FC
-        polys = scenario_to_polygons(sc)              # polígonos puros
-        upload_fence_to_fc(dron, polys)               # subida geofence
-        dron.setScenario(sc)                          # lógica estación de tierra
-
+        setup_fence_params(dron)
+        polys = scenario_to_polygons(sc)
+        upload_fence_to_fc(dron, polys)
+        dron.setScenario(sc)
 
     hilos = []
     for i in range(len(swarm)):
         th = threading.Thread(target=configure, args=(i,), daemon=True)
         hilos.append(th)
         th.start()
-        time.sleep(0.2)                               # suaviza tráfico MAVLink
+        time.sleep(0.2) # suaviza tráfico MAVLink
     for th in hilos:
         th.join(timeout=10)
 
-    # ------------------------------------------------------------------
     sendBtn['bg'] = 'green'
-    assign_player_zones()           # si ya la usabas
+    assign_player_zones()
     mostrar_configuracion_juego()
     global bullets_enabled
     bullets_enabled = True  # ja es pot disparar
     global scenario_ready
     scenario_ready = True
-    messagebox.showinfo("Escenario enviado",
-                        "Geofence y escenario configurados en todos los drones.")
 
 
 # configuración del frame con los botones 2 min, 5 min, 8 min y supervivencia
@@ -1171,7 +1160,6 @@ def seleccionar_tiempo_teams():
         top.destroy()                  # Cerramos la ventana emergente
         configuracionFrame.grid_remove()   # Oculta tu frame de config
         startGameBtn.grid(row=9, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
-        messagebox.showinfo("Modo 2 vs 2", f"Has seleccionado {minutos} minutos.")
 
     # Función para modo supervivencia
     def set_supervivencia():
@@ -1181,7 +1169,6 @@ def seleccionar_tiempo_teams():
         top.destroy()
         configuracionFrame.grid_remove()
         startGameBtn.grid(row=9, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
-        messagebox.showinfo("Modo 2 vs 2", "Has seleccionado Modo Supervivencia.")
 
     # Botones para cada opción
     tk.Button(top, text="2 min", bg="dark orange", command=lambda: set_tiempo(2)) \
@@ -1200,7 +1187,6 @@ def seleccionar_configuracion_tiempo(minutos):
     global game_duration, survival_mode
     survival_mode = False
     game_duration = minutos * 60
-    messagebox.showinfo("Tiempo del Juego", f"Tiempo configurado a {minutos} minutos.")
     ocultar_botones_configuracion()
 
 
@@ -1209,7 +1195,6 @@ def seleccionar_modo_supervivencia():
     global survival_mode, game_duration
     survival_mode = True
     game_duration = None  # Juego sin límite de tiempo
-    messagebox.showinfo("Modo Supervivencia", "Modo supervivencia activado.")
     ocultar_botones_configuracion()
 
 
@@ -2040,7 +2025,7 @@ def checkGameEnd():
             show_game_stats()
         return
 
-    #  Caso 2 vs 2 en supervivencia
+    #  2 vs 2 en supervivencia
     if game_mode == "teams":
         # Contamos cuántos quedan activos en cada equipo
         active_team0 = sum(1 for p in players if p['team'] == 0 and p['status'] == 'active')
@@ -3388,17 +3373,18 @@ def startGame():
     global players, eliminated_players, recording_enabled
     global game_clock_label, game_timer_running, game_elapsed_seconds
     global session_id
-    bullets_enabled = True  # habilitamos 5-6-7 tan pronto empieza la partida
+    bullets_enabled = True  # habilitamos disparos
 
+    # Fija siempre session_id = "1" sin preguntar
     if session_id is None:
-        session_id = askstring("Sesión", "Session ID para empezar la partida:")
-        if not session_id:
-            return
+        session_id = "1"
+        print(f"[INFO] Usando sesión por defecto: {session_id}")
 
         # Todos los drones se unen a la sesión
         for color_key, client in dron_clients.items():
             client.emit('join', {'sessionId': session_id}, namespace='/jocs')
 
+        # Notifica al profesor que arranca la competición
         sio_prof.emit('startCompetition', {'sessionId': session_id}, namespace='/professor')
         print("startCompetition enviado")
 
@@ -3450,7 +3436,7 @@ def startGame():
             print(f"[ERROR] Índice de color inválido: {idx}")
             continue
 
-        simple_color = color_keys[idx]  # p.ej. 'rojo'
+        simple_color = color_keys[idx]  # 'rojo'
         email = color_to_email[simple_color]  # mapeo anterior
 
         if idx >= len(scenarios):
@@ -3786,7 +3772,7 @@ def colocar_obstaculo(coords, placer_id: int = 0):
     )
     polys.append(poly_widget)
 
-    # efecto espejo (sin cambios)
+    # efecto espejo
     if mirror_placement and numPlayers > 1:
         mirror_obstacle(obst)
 
@@ -3858,7 +3844,6 @@ def _in_respawn(player_id: int) -> bool:
 
 
 if __name__ == "__main__":
-
     ventana = crear_ventana()
     setupControlButtons()
     ventana.mainloop()

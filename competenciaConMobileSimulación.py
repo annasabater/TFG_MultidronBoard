@@ -35,7 +35,7 @@ SERVER_URL = os.getenv('SERVER_URL')
 ADMIN_KEY = os.getenv('ADMIN_KEY', '')
 
 if not SERVER_URL or not ADMIN_KEY:
-    print("Debes definir SERVER_URL y ADMIN_KEY en tu .env")
+    print("Debes definir SERVER_URL y ADMIN_KEY en tu .env.local")
     sys.exit(1)
 
 PLAYER_COLORS  = ['rojo', 'azul', 'verde', 'amarillo']
@@ -133,7 +133,7 @@ dron_clients = {}
 
 for color, (email, pwd) in DRONS.items():
     if not email or not pwd:
-        print(f"Falta email/password para dron {color} en .env")
+        print(f"Falta email/password para dron {color} en .env.local")
         sys.exit(1)
     token = login(email, pwd)
     dron_clients[color] = make_dron_client(color, token)

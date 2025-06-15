@@ -5,11 +5,18 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="1da3c4dc-7240-4b2b-a745-1fcafd148539" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/competenciaConMobileReal_PROVA.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/competenciaConMobileReal_PROVA1.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.dockerignore" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.env.local" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/Dockerfile" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.env" beforeDir="false" afterPath="$PROJECT_DIR$/.env.prod" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/competenciaConMobile.py" beforeDir="false" afterPath="$PROJECT_DIR$/competenciaConMobile.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/competenciaConMobileReal.py" beforeDir="false" afterPath="$PROJECT_DIR$/competenciaConMobileReal.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/dronLink/Dron.py" beforeDir="false" afterPath="$PROJECT_DIR$/dronLink/Dron.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/competenciaConMobileReal_PROVA.py" beforeDir="false" afterPath="$PROJECT_DIR$/competenciaConMobileReal_PROVA.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/competenciaConMobileReal_PROVA1.py" beforeDir="false" afterPath="$PROJECT_DIR$/competenciaConMobileReal_PROVA1.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/competenciaConMobileSimulación.py" beforeDir="false" afterPath="$PROJECT_DIR$/competenciaConMobileSimulación.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/competenciaConMobile_prova.py" beforeDir="false" afterPath="$PROJECT_DIR$/competenciaConMobile_prova.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
