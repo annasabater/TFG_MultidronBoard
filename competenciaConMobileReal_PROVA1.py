@@ -25,15 +25,15 @@ from math import radians, sin, cos, sqrt, atan2
 from PIL import Image, ImageTk, ImageEnhance
 from shapely.geometry import Point, Polygon, LineString
 from shapely.affinity import rotate
-import os, sys, time, threading
+import os, sys, time
 import requests
 import socketio
-from dotenv import load_dotenv
 from tkinter.simpledialog import askstring
 global swarm
-import pygame
 from pymavlink import mavutil
 from shapely import affinity
+from dotenv import load_dotenv, find_dotenv
+import pygame, threading
 
 bullets_enabled = False
 scenario_ready = False
@@ -42,8 +42,6 @@ try:
     swarm
 except NameError:
     swarm = []
-
-import pygame, threading
 
 pygame.init()
 pygame.joystick.init()
@@ -180,17 +178,21 @@ ENV = "local"
 print(f"[INFO] Entorn fixat a {ENV.upper()}")
 
 # carreguem el fitxer adequat
-env_file = ".env.local" if ENV == "local" else ".env.prod"
+env_file = ".env" if ENV == "local" else ".env.prod"
 if not load_dotenv(env_file, override=True):
     sys.exit(f"No s'ha trobat {env_file}")
 
-# variables Globals
-BASE_URL   = os.getenv("SERVER_URL", "https://ea2-api.upc.edu/").rstrip("/")
+# Carrega automàticament el .env que estigui en la ruta del projecte
+load_dotenv(find_dotenv())
+
+# Ara ja tens totes les variables del .env en os.environ
+BASE_URL = os.getenv("SERVER_URL")    # No cal posar fallback
+IS_HTTPS = BASE_URL.startswith("https")
+print(f"[INFO] Entorn → {BASE_URL}")
 
 # http://localhost:9000
 # https://ea2-api.upc.edu/
 
-VERIFY_SSL = os.getenv("VERIFY_SSL", "true").lower() == "true"
 IS_HTTPS   = BASE_URL.startswith("https")
 print(f"[INFO] {ENV.upper()}  →  {BASE_URL}")
 
@@ -212,8 +214,7 @@ def email_of_id(id):          # 0-3 → dron_rojo1@upc.edu …
 
 def login(email: str, password: str) -> str:
     r = requests.post(f"{API_URL}/auth/login",
-                      json={"email": email, "password": password},
-                      verify=VERIFY_SSL)
+                      json={"email": email, "password": password})
     if r.status_code != 200:
         print("Login failed:", r.status_code, r.text)
         r.raise_for_status()
@@ -222,9 +223,44 @@ def login(email: str, password: str) -> str:
 #  cliente socket para el profesor
 sio_prof = socketio.Client(
     logger=False,
-    engineio_logger=False,
-    ssl_verify=VERIFY_SSL
+    engineio_logger=False
 )
+
+import socketio, time
+
+# ---------- compatibilidad 4.x / 5.x<5.6 ------------------------------
+if not hasattr(socketio.Client, "connection_state"):
+    # Emulamos la API nueva usando las propiedades viejas
+    def _conn_state(self, ns="/"):
+        # True si estamos conectados globalmente **y** el namespace está en uso
+        return "connected" if (self.connected and ns in self.namespaces) \
+                            else "disconnected"
+    socketio.Client.connection_state = _conn_state
+# ----------------------------------------------------------------------
+
+
+def _ns_connected(sio: socketio.Client, ns: str = "/"):
+    """Devuelve True si el namespace está realmente conectado,
+       sea cual sea la versión de python-socketio que se use."""
+    return sio.connection_state(ns) == "connected"
+
+
+def wait_until_connected(sio, ns="/jocs", timeout=5.0):
+    t0 = time.time()
+    while not _ns_connected(sio, ns):
+        if time.time() - t0 > timeout:
+            raise RuntimeError(f"Timeout esperando conexión a {ns}")
+        time.sleep(0.05)
+
+
+def safe_emit(sio, event, data, namespace="/jocs", retries=3, delay=0.05):
+    for _ in range(retries):
+        if _ns_connected(sio, namespace):
+            sio.emit(event, data, namespace=namespace)
+            return
+        time.sleep(delay)
+    print(f"[WARN] emit «{event}» descartado; {namespace} sin conectar")
+
 
 @sio_prof.event(namespace='/professor')
 def connect():
@@ -249,8 +285,7 @@ except Exception as e:
 def make_dron_client(color, token):
     sio = socketio.Client(
         logger=False,
-        engineio_logger=False,
-        ssl_verify=VERIFY_SSL
+        engineio_logger=False
     )
 
     @sio.event(namespace='/jocs')
@@ -296,7 +331,7 @@ dron_clients = {}
 
 for color, (email, pwd) in DRONS.items():
     if not email or not pwd:
-        print(f"Falta email/password para dron {color} en .env.local")
+        print(f"Falta email/password para dron {color} en .env")
         sys.exit(1)
     token = login(email, pwd)
     dron_clients[color] = make_dron_client(color, token)
@@ -2760,8 +2795,8 @@ def update_score(event_type: str, player_id: int):
 
     color = color_of_id(player_id)
     email = email_of_id(player_id)
-    dron_clients[color].emit(
-        'score',
+    safe_emit(
+    dron_clients[color], 'score',
         {
             'sessionId': session_id,
             'drone'    : email,
@@ -3373,7 +3408,7 @@ def startGame():
     global players, eliminated_players, recording_enabled
     global game_clock_label, game_timer_running, game_elapsed_seconds
     global session_id
-    bullets_enabled = True  # habilitamos disparos
+    global bullets_enabled
 
     # Fija siempre session_id = "1" sin preguntar
     if session_id is None:
@@ -3383,7 +3418,9 @@ def startGame():
         # Todos los drones se unen a la sesión
         for color_key, client in dron_clients.items():
             client.emit('join', {'sessionId': session_id}, namespace='/jocs')
+            wait_until_connected(client)
 
+        bullets_enabled = True
         # Notifica al profesor que arranca la competición
         sio_prof.emit('startCompetition', {'sessionId': session_id}, namespace='/professor')
         print("startCompetition enviado")
@@ -3564,7 +3601,8 @@ def processTelemetryInfo(pid: int, info: dict):
 
     color = color_of_id(pid)
     email = email_of_id(pid)
-    dron_clients[color].emit(
+    safe_emit(
+    dron_clients[color],
         'telemetry',
         {'sessionId': session_id,
          'drone'    : email,
@@ -3582,7 +3620,8 @@ def move_bullet(marker, start_pos, heading, step, shooter_id, radius_m):
     email     = email_of_id(shooter_id)
 
     # alta inicial en el frontend
-    dron_clients[color].emit(
+    safe_emit(
+    dron_clients[color],
         'bullet', {'sessionId': session_id, 'drone': email,
                    'bulletId': bullet_id, 'lat': lat, 'lon': lon,
                    'event': 'create'}, namespace='/jocs')
@@ -3596,7 +3635,8 @@ def move_bullet(marker, start_pos, heading, step, shooter_id, radius_m):
         lon += step * math.sin(math.radians(heading))
         marker.set_position(lat, lon)
 
-        dron_clients[color].emit(
+        safe_emit(
+            dron_clients[color],
             'bullet', {'sessionId': session_id, 'drone': email,
                        'bulletId': bullet_id, 'lat': lat, 'lon': lon,
                        'event': 'move'}, namespace='/jocs')
@@ -3619,7 +3659,8 @@ def move_bullet(marker, start_pos, heading, step, shooter_id, radius_m):
 
             # destruir bala y salir
             marker.delete()
-            dron_clients[color].emit(
+            safe_emit(
+            dron_clients[color],
                 'bullet', {'sessionId': session_id, 'drone': email,
                            'bulletId': bullet_id, 'event': 'destroy'},
                 namespace='/jocs')
@@ -3632,7 +3673,8 @@ def move_bullet(marker, start_pos, heading, step, shooter_id, radius_m):
             eliminateDrone(victim)
 
             marker.delete()
-            dron_clients[color].emit(
+            safe_emit(
+            dron_clients[color],
                 'bullet', {'sessionId': session_id, 'drone': email,
                            'bulletId': bullet_id, 'event': 'destroy'},
                 namespace='/jocs')
@@ -3649,7 +3691,8 @@ def _destroy_bullet(marker, bullet_id, color, email):
         pass
     active_bullets[:] = [m for m in active_bullets if m is not marker]
 
-    dron_clients[color].emit(
+    safe_emit(
+    dron_clients[color],
         'bullet',
         {'sessionId': session_id, 'drone': email,
          'bulletId': bullet_id, 'event': 'destroy'},
@@ -3711,7 +3754,8 @@ def destroy_obstacle(obstacle: dict, remover_id: int = 0) -> None:
     # avisar por websocket (una sola vez basta)
     color = color_of_id(remover_id)
     email = email_of_id(remover_id)
-    dron_clients[color].emit(
+    safe_emit(
+    dron_clients[color],
         'obstacle',
         {
             'sessionId': session_id,
@@ -3779,7 +3823,8 @@ def colocar_obstaculo(coords, placer_id: int = 0):
     # notificamos por websocket
     color = color_of_id(placer_id)
     email = email_of_id(placer_id)
-    dron_clients[color].emit(
+    safe_emit(
+    dron_clients[color],
         'obstacle',
         {
             'sessionId': session_id,
@@ -3803,7 +3848,8 @@ def eliminateDrone(drone_id: int) -> None:
     # avisamos a todos
     color = color_of_id(drone_id)
     email = email_of_id(drone_id)
-    dron_clients[color].emit(
+    safe_emit(
+    dron_clients[color],
         'drone_state',
         {'sessionId': session_id, 'drone': email, 'state': 'landed'},
         namespace='/jocs')
@@ -3825,7 +3871,8 @@ def respawnDrone(drone_id: int) -> None:
 
     color = color_of_id(drone_id)
     email = email_of_id(drone_id)
-    dron_clients[color].emit(
+    safe_emit(
+    dron_clients[color],
         'drone_state',
         {'sessionId': session_id, 'drone': email, 'state': 'flying'},
         namespace='/jocs')
