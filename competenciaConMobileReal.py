@@ -66,6 +66,7 @@ def _set_yaw(dron, hdg: float):
     elif hasattr(dron, "setYaw"):
         dron.setYaw(hdg)
 
+
 def joystick_loop():
     clock = pygame.time.Clock()
     while True:

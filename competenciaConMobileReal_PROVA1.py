@@ -1,7 +1,6 @@
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-
 import json
 import math
 import random
@@ -37,6 +36,7 @@ import pygame, threading
 
 bullets_enabled = False
 scenario_ready = False
+match_started = False
 
 try:
     swarm
@@ -52,7 +52,7 @@ joys     = [pygame.joystick.Joystick(i) for i in range(num_joys)]
 for j in joys:
     j.init()
 
-# ── Mapeig **dinàmic**: joystick 0→dron 0, joystick 1→dron 1, … (màxim 4)
+# joystick 0→dron 0, joystick 1→dron 1, … (màxim 4)
 joy_to_drone = {jid: jid for jid in range(min(num_joys, 4))}
 
 
@@ -66,25 +66,24 @@ _prev_btns = {
 AX_L_H, AX_L_V = 0, 1     # Stick izquierdo: X=yaw, Y=throttle
 AX_R_H, AX_R_V = 2, 3     # Stick derecho:  X=roll, Y=pitch
 
+BTN_LAND     = 0   # LAND   → Aterrar i desarmar els motors
+BTN_GUIDED   = 1   # GUIDED → Mode de vol guiado
+BTN_LOITER   = 2   # LOITER → Manté posició i altitud
+BTN_RTL      = 3   # RTL    → Return To Launch (tornar al punt d’origen)
+BTN_IDENTIFY = 4   # IDENTIFY → Senyal luminoso/acústic per localitzar
 
-BTN_LAND      = 0   # Desarmar i aterrar
-BTN_GUIDED    = 1   # GUIDED
-BTN_LOITER    = 2   # LOITER
-BTN_RTL       = 3   # RTL
-BTN_IDENTIFY  = 4   # Identify (sempre actiu)
+BTN_BIG      = 5   # Bala gran   → shoot(pid, "large_slow")
+BTN_MED      = 6   # Bala mitjana→ shoot(pid, "medium")
+BTN_SMALL    = 7   # Bala petita → shoot(pid, "small_fast")
 
-# Bales
-BTN_BIG       = 5   # Bala gran  (large_slow)
-BTN_MED       = 6   # Bala mitjana (medium)
-BTN_SMALL     = 7   # Bala petita (small_fast)
-
-BTN_ARMAR     = 8   # Arm
-BTN_DESPEGAR  = 9   # Take-off 5 m
+BTN_ARMAR    = 8   # ARM     → Armar motors (dron.arm())
+BTN_DESPEGAR = 9   # TAKEOFF → Enlairar a 5 m (dron.takeoff(5))
 
 DEADZONE  = 0.05
-STEP_GPS  = 5e-5
-STEP_ALT  = 0.10
+STEP_GPS = 2e-4    # desplazamiento por iteración en lat/lon
+STEP_ALT = 0.20    # desplazamiento altitud por iteración
 STEP_YAW  = 4
+MAX_ALT = 5           # altura de juego (= techo)
 
 
 def _dz(v: float) -> float:
@@ -112,6 +111,7 @@ def _guided(d):    d.setFlightMode('GUIDED')
 
 
 def joystick_loop():
+    global match_started
     clock = pygame.time.Clock()
 
     while True:
@@ -126,12 +126,18 @@ def joystick_loop():
             #  botones “fijos”
             button_actions = {
                 BTN_IDENTIFY: lambda d=dron: _identify(d) if _ready(d) else None,
-                BTN_ARMAR: lambda d=dron: _arm(d) if _ready(d) else None,
+                # sólo si no ha empezado la partida permitimos re-armar
+            }
+            if not match_started:
+                button_actions[BTN_ARMAR] = lambda d=dron: _arm(d) if _ready(d) else None
+
+            # botones siempre disponibles:
+            button_actions.update({
                 BTN_DESPEGAR: lambda d=dron: _takeoff(d) if _ready(d) else None,
                 BTN_RTL: lambda d=dron: _rtl(d) if _ready(d) else None,
                 BTN_LOITER: lambda d=dron: _loiter(d) if _ready(d) else None,
                 BTN_GUIDED: lambda d=dron: _guided(d) if _ready(d) else None,
-            }
+            })
 
             #  disparos sólo si bullets_enabled
             if bullets_enabled:
@@ -159,13 +165,14 @@ def joystick_loop():
                            player_id=drone_id)
 
             if lv:
-                dron.goto(dron.lat, dron.lon,
-                          max(0, dron.alt + (-lv)*STEP_ALT))
+                new_alt = max(0, min(MAX_ALT,
+                                     dron.alt + (-lv) * STEP_ALT))
+                dron.goto(dron.lat, dron.lon, new_alt)
 
-            if lh:
+        if lh:
                 _set_yaw(dron, (dron.heading + lh*STEP_YAW) % 360)
 
-        clock.tick(40)
+        clock.tick(80)
 
 if num_joys:
     threading.Thread(target=joystick_loop, daemon=True).start()
@@ -226,17 +233,12 @@ sio_prof = socketio.Client(
     engineio_logger=False
 )
 
-import socketio, time
 
-# ---------- compatibilidad 4.x / 5.x<5.6 ------------------------------
 if not hasattr(socketio.Client, "connection_state"):
-    # Emulamos la API nueva usando las propiedades viejas
     def _conn_state(self, ns="/"):
-        # True si estamos conectados globalmente **y** el namespace está en uso
         return "connected" if (self.connected and ns in self.namespaces) \
                             else "disconnected"
     socketio.Client.connection_state = _conn_state
-# ----------------------------------------------------------------------
 
 
 def _ns_connected(sio: socketio.Client, ns: str = "/"):
@@ -253,13 +255,15 @@ def wait_until_connected(sio, ns="/jocs", timeout=5.0):
         time.sleep(0.05)
 
 
-def safe_emit(sio, event, data, namespace="/jocs", retries=3, delay=0.05):
+def safe_emit(sio, event, data, namespace="/jocs",
+              retries=40, delay=0.25):
     for _ in range(retries):
         if _ns_connected(sio, namespace):
             sio.emit(event, data, namespace=namespace)
-            return
-        time.sleep(delay)
-    print(f"[WARN] emit «{event}» descartado; {namespace} sin conectar")
+            return True
+        time.sleep(delay)          # esperamos a que se restablezca
+    print(f"[WARN] emit «{event}» descartado tras {retries} intentos")
+    return False
 
 
 @sio_prof.event(namespace='/professor')
@@ -273,7 +277,6 @@ def connect_error(data):
 try:
     sio_prof.connect(
         BASE_URL,
-        transports=["websocket"],
         namespaces=["/professor"],
         auth={"/professor": {"key": ADMIN_KEY}}
     )
@@ -282,15 +285,37 @@ except Exception as e:
     sys.exit(1)
 
 
-def make_dron_client(color, token):
+def make_dron_client(color: str, token: str):
     sio = socketio.Client(
         logger=False,
-        engineio_logger=False
+        engineio_logger=False,
+        reconnection=True,
+        reconnection_delay=2,
+        reconnection_delay_max=10,
+        reconnection_attempts=0,        # infinito
+        engineio_options={
+            "ping_interval": 40,
+            "ping_timeout": 120,
+        },
     )
 
     @sio.event(namespace='/jocs')
+    def disconnect():
+        print(f"[{color}] >>> disconnect (reason={sio.eio.state})")
+
+    def _join_room():
+        if session_id:
+            sio.emit('join', {'sessionId': session_id}, namespace='/jocs')
+
+    @sio.event(namespace='/jocs')
     def connect():
-        print(f"🔌 Dron {color} conectado a /jocs")
+        print(f"[{color}] conectado  id={sio.sid}")
+        _join_room()              # 1ª vez
+
+    @sio.event(namespace='/jocs')
+    def reconnect():
+        print(f"[{color}] RE-conectado  id={sio.sid}")
+        _join_room()              # cada re-conexión
 
     @sio.on('state_update', namespace='/jocs')
     def on_state_update(data):
@@ -314,7 +339,6 @@ def make_dron_client(color, token):
     # Conectamos
     sio.connect(
         BASE_URL,
-        transports=["websocket"],
         namespaces=["/jocs"],
         auth={"token": token}
     )
@@ -1027,40 +1051,28 @@ def _param_set(mav, name: str, value, ptype):
     # esperamos 2 s el PARAM_VALUE de eco (sin filtrar por param_id)
     mav.recv_match(type='PARAM_VALUE', blocking=True, timeout=2)
 
-# ----------------------------------------------------------- geofence params --
 def setup_fence_params(dron):
     m = dron.vehicle  # conexión mavutil
 
     try:
-        _param_set(m, 'FENCE_ENABLE', 1, mavutil.mavlink.MAV_PARAM_TYPE_INT32)  # valla ON
+        _param_set(m, 'FENCE_ENABLE', 1, mavutil.mavlink.MAV_PARAM_TYPE_INT32)  # activar valla
         _param_set(m, 'FENCE_TYPE', 3, mavutil.mavlink.MAV_PARAM_TYPE_INT32)  # 3 = polígono
-        _param_set(m, 'FENCE_ACTION', 1, mavutil.mavlink.MAV_PARAM_TYPE_INT32)  # 1 = RTL
-        _param_set(m, 'FENCE_ALT_MAX', 120, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)  # techo
-
-        # ➜ nuevo parámetro:
+        _param_set(m, 'FENCE_ACTION', 2, mavutil.mavlink.MAV_PARAM_TYPE_INT32)  # 2 = LAND
+        _param_set(m, 'FENCE_ALT_MAX', 5, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)  # techo 5 m
+        _param_set(m, 'FENCE_MARGIN', 1, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)  # margen 1 m
         _param_set(m, 'FENCE_MARGIN', 5, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)  # 5 m
 
         print(f"[{dron}] parámetros FENCE_* enviados")
     except Exception as e:
         print(f"[{dron}] setup_fence_params: {e}")
 
-
-# ------------------------------------------------------------ subir polígonos --
-# --- NUEVA VERSIÓN upload_fence_to_fc -------------------------------
 def upload_fence_to_fc(dron, polygons):
-    """
-    polygons  ->  [ [(lat,lon),…] ,  # 1º = inclusión
-                    [(lat,lon),…] ,  # 2º = exclusión
-                    … ]
-    """
     m = dron.vehicle
     total = sum(len(p) for p in polygons)
 
-    # (1) fijar número total de vértices
     _param_set(m, 'FENCE_TOTAL', total,
                mavutil.mavlink.MAV_PARAM_TYPE_INT32)
 
-    # (2) enviar cada polígono por separado
     for poly in polygons:
         cnt = len(poly)
         for idx, (lat, lon) in enumerate(poly):
@@ -1075,7 +1087,6 @@ def upload_fence_to_fc(dron, polygons):
             time.sleep(0.05) # aligera el tráfico MAVLink
 
 
-
 def load_first_competition(n_players: int):
     patron = os.path.join("competencia", f"*_{n_players}.json")
     archivos = glob.glob(patron)
@@ -1088,10 +1099,11 @@ def load_first_competition(n_players: int):
 def sendCircuit():
     global swarm, scenario, selectedMultiScenario, numPlayers, obstacles
 
+
     if not scenario and not selectedMultiScenario:
         selectedMultiScenario = load_first_competition(numPlayers)
 
-    if selectedMultiScenario:                         # === multi-escenario ===
+    if selectedMultiScenario:
         scenarios = selectedMultiScenario.get('scenarios', [])
         if len(scenarios) < len(swarm):
             messagebox.showerror("Error",
@@ -3409,6 +3421,8 @@ def startGame():
     global game_clock_label, game_timer_running, game_elapsed_seconds
     global session_id
     global bullets_enabled
+    global match_started
+    match_started = True
 
     # Fija siempre session_id = "1" sin preguntar
     if session_id is None:
@@ -3417,8 +3431,8 @@ def startGame():
 
         # Todos los drones se unen a la sesión
         for color_key, client in dron_clients.items():
-            client.emit('join', {'sessionId': session_id}, namespace='/jocs')
             wait_until_connected(client)
+            client.emit('join', {'sessionId': session_id}, namespace='/jocs')
 
         bullets_enabled = True
         # Notifica al profesor que arranca la competición
@@ -3600,6 +3614,7 @@ def processTelemetryInfo(pid: int, info: dict):
         total_distances[pid] += haversine_distance(prev, pos)
 
     color = color_of_id(pid)
+    positions[color] = (lat, lon)
     email = email_of_id(pid)
     safe_emit(
     dron_clients[color],
@@ -3683,7 +3698,6 @@ def move_bullet(marker, start_pos, heading, step, shooter_id, radius_m):
         time.sleep(0.01)
 
 
-# ---------- helper separado (sin cambios) ----------
 def _destroy_bullet(marker, bullet_id, color, email):
     try:
         marker.delete()
@@ -3700,7 +3714,6 @@ def _destroy_bullet(marker, bullet_id, color, email):
     )
 
 
-# ---------- nueva función utilitaria ---------------
 def _check_hit_obstacle(point, deg_buf, shooter_id):
     """Devuelve el obstáculo impactado (o None).  Marca instantáneamente
        como destruido para el resto de hilos."""
@@ -3718,51 +3731,61 @@ def _check_hit_obstacle(point, deg_buf, shooter_id):
     return None
 
 
+def _tk_safe(fn, *args, **kwargs):
+    ventana.after(0, lambda: fn(*args, **kwargs))
 
 
 def destroy_obstacle(obstacle: dict, remover_id: int = 0) -> None:
     global obstacles, polys, selectedMultiScenario, _removed_bboxes
 
-    bbox = get_bbox(obstacle)              # (minx, miny, maxx, maxy)
-    _removed_bboxes.add(bbox)              # ← lo marcamos como destruido
+    # Marcar BBox como eliminado para evitar recreaciones
+    bbox = get_bbox(obstacle)
+    _removed_bboxes.add(bbox)
 
-    # borrar TODOS los polígonos idénticos del mapa
+    # Quitar el polígono del mapa
     for poly in polys[:]:
+        # En la lista puede haber MapPolygon, listas, tuplas, etc.
+        # Solo tratamos los elementos que realmente son un MapPolygon.
+        if not hasattr(poly, "position_list"):
+            continue
+
         try:
-            if get_bbox({
+            same = get_bbox({
                 'type': 'polygon',
                 'waypoints': [{'lat': p[0], 'lon': p[1]} for p in poly.position_list]
-            }) == bbox:
-                poly.delete()
+            }) == bbox
+            if same:
+                _tk_safe(poly.delete)
                 polys.remove(poly)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[destroy_obstacle] {e}")
 
-    # borrar TODAS las copias de la lista obstacles
+    # Limpiar estructuras de datos
     obstacles[:] = [obs for obs in obstacles if get_bbox(obs) != bbox]
 
-    # idem dentro del escenario cargado
     for scn in selectedMultiScenario.get('scenarios', []):
-        scn['scenario'][:] = [obs for obs in scn['scenario'] if get_bbox(obs) != bbox]
+        scn['scenario'][:] = [
+            obs for obs in scn['scenario'] if get_bbox(obs) != bbox
+        ]
 
+    #  Subir nuevo geofence a cada dron
     for i, dron in enumerate(swarm):
-        # ‘scenario’ del jugador i SIN el obstáculo eliminado
         scn = selectedMultiScenario['scenarios'][i]['scenario']
-        polys = scenario_to_polygons(scn)
-        upload_fence_to_fc(dron, polys)
+        new_polys = scenario_to_polygons(scn)
+        upload_fence_to_fc(dron, new_polys)
 
-    # avisar por websocket (una sola vez basta)
+    #  Avisar por WebSocket
     color = color_of_id(remover_id)
     email = email_of_id(remover_id)
     safe_emit(
-    dron_clients[color],
+        dron_clients[color],
         'obstacle',
         {
             'sessionId': session_id,
-            'drone':     email,
-            'type':      obstacle['type'],
-            'geometry':  obstacle['waypoints'],
-            'event':     'remove'
+            'drone': email,
+            'type': obstacle['type'],
+            'geometry': obstacle['waypoints'],
+            'event': 'remove'
         },
         namespace='/jocs'
     )
