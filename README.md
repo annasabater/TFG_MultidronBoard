@@ -39,23 +39,36 @@ DRON_AMARILLO_PASSWORD=Dron_amarillo1*
 ## Instal·lació de l'entorn
 
 urllib3
+
 python-dotenv
+
 tkintermapview
+
 pyautogui
+
 python-socketio
+
 requests
+
 pymavlink
+
 geopy
+
 geographiclib
+
 shapely
+
 Pillow
+
 pygame
 
 
 ## Vídeos
 
 Enllaç del vídeo de funcionament: https://www.youtube.com/watch?v=esVt7HLI734
+
 Enllaç del vídeo del recorregut pel codi: https://www.youtube.com/watch?v=mCd6iSzXLA0
+
 Enllaç del vídeo demostratiu del script qr.py per a la generació del codi QR: https://www.youtube.com/watch?v=au_gs2SIiac
 
 
