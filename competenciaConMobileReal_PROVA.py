@@ -1,42 +1,72 @@
-import json
-import math
-from tkinter import ttk
-import tkinter as tk
+# Comunicació HTTP i gestió d'advertències SSL
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Processament de dades i càlculs
+import json, math
+from math import radians, sin, cos, sqrt, atan2
+
+# Identificadors únics
 import uuid
-from tkinter import messagebox
+
+# Accés a variables d'entorn
+from dotenv import load_dotenv, find_dotenv
+
+# GUI amb Tkinter
+import tkinter as tk
+from tkinter import ttk, Canvas, messagebox
+from tkinter.simpledialog import askstring
+
+# Mapes dins de Tkinter
 import tkintermapview
-import pyautogui
-import glob
-from tkinter import Canvas
+
+# Automatització de pantalla i fitxers
+import pyautogui, glob
+
+# Comunicació en temps real
+import socketio, requests
+
+# Drone i MAVLink
 from dronLink.Dron import Dron
-import geopy.distance
-from geographiclib.geodesic import Geodesic
+from pymavlink import mavutil
 from ParameterManager import ParameterManager
 from AutopilotControllerClass import AutopilotController
-from math import radians, sin, cos, sqrt, atan2
-from PIL import Image, ImageTk, ImageEnhance
+
+# Càlculs geogràfics
+import geopy.distance
+from geographiclib.geodesic import Geodesic
+
+# Geometria amb Shapely
 from shapely.geometry import Point, Polygon, LineString
-import os, sys, time, pygame, threading
-import requests
-import socketio
-from dotenv import load_dotenv
-from tkinter.simpledialog import askstring
-global swarm
-from pymavlink import mavutil
+from shapely.affinity import rotate
 from shapely import affinity
 
+# Manipulació d’imatges
+from PIL import Image, ImageTk, ImageEnhance
 
-active_bullets = [] # todas las balas en vuelo activas
-players = [] # Lista de jugadores
+# Altres utilitats
+import os, sys, time, threading
+
+# So i efectes sonors
+import pygame
+
+
+
+_removed_bboxes: set[tuple[float,float,float,float]] = set()
+_destroyed_obstacles: set[int] = set()   # guarda id() de cada obstáculo ya eliminado
+_lock_obstacles = threading.Lock()
+
+active_bullets = [] # Lista para almacenar balas activas
+players = []
 teams = []
 obstacles = []
 buttons = []
-flight_times = [0, 0, 0, 0] # segundos en aire por dron
+flight_times = [0, 0, 0, 0]
 
 eliminated_players = set()
 flight_times_lock = threading.Lock()
 
-RESPAWN_SECS = 10 # tiempo hasta reaparecer
+respawn_time = 15  # Segundos
 game_elapsed_seconds = 0
 active_player_id = 0
 game_duration = 1600  # Duración por defecto (8 minutos)
@@ -49,10 +79,8 @@ initial_positions = {} # guarda la posición inicial de cada dron
 total_distances = {} # guarda la distancia total recorrida por cada dron
 player_fences_completed = {}
 should_reset_distance = {}
-_last_death_ts = {}
+_last_cmd_ts = {}
 
-bullets_enabled = False
-scenario_ready = False
 survival_mode = False
 game_paused = False
 mode_selected = False
@@ -62,8 +90,11 @@ recording_enabled = False
 game_timer_running = False
 mirror_placement = False    # True si el usuario elige "Efecto Espejo", False si "Individual"
 removing_obstacles = False  # True si estamos en modo eliminar obstáculos
+bullets_enabled = False
+scenario_ready = False
+match_started = False
 
-obstaculosFrame = None      # Frame donde pondremos los botones
+obstaculosFrame = None
 configuracionFrame = None
 game_mode = None
 direction_lines = [None, None, None, None]
@@ -72,56 +103,59 @@ game_clock_label = None
 timeBtn = None
 plotBtn = None
 statsBtn = None
-session_id = None
+
 
 try:
     swarm
 except NameError:
     swarm = []
 
-# Inicialización de Pygame y del módulo de joysticks
 pygame.init()
 pygame.joystick.init()
+players            = []
 
-# Detectar cuántos joysticks (mandos) hay conectados
 num_joys = pygame.joystick.get_count()
-
-# Crear objeto Joystick para cada uno y almacenarlos en una lista
-joys = [pygame.joystick.Joystick(i) for i in range(num_joys)]
+joys     = [pygame.joystick.Joystick(i) for i in range(num_joys)]
 for j in joys:
-    j.init()  # Inicializar cada mando
+    j.init()
 
-# Mapear cada ID de joystick a un dron, máximo 4
+# joystick 0→dron 0, joystick 1→dron 1, … (max 4)
 joy_to_drone = {jid: jid for jid in range(min(num_joys, 4))}
 
-# Mantener un buffer del estado anterior de cada botón de cada mando
+
 _prev_btns = {
     jid: [False] * joy.get_numbuttons()
     for jid, joy in enumerate(joys)
 }
 
-# Ejes
 AX_L_H, AX_L_V = 0, 1     # Stick izquierdo: X=yaw, Y=throttle
 AX_R_H, AX_R_V = 2, 3     # Stick derecho:  X=roll, Y=pitch
 
-BTN_LAND      = 0   # Desarmar i aterrar
-BTN_GUIDED    = 1   # GUIDED
-BTN_LOITER    = 2   # LOITER
-BTN_RTL       = 3   # RTL
-BTN_IDENTIFY  = 4   # Identify (sempre actiu)
+BTN_LAND     = 2   # LAND   → Aterrar i desarmar els motors
+BTN_GUIDED   = 1   # GUIDED → Mode de vol guiado
+# BTN_LOITER   = 3   # LOITER → Manté posició i altitud
+BTN_RTL      = 0   # RTL    → Return To Launch (tornar al punt d’origen)
+BTN_IDENTIFY = 4   # IDENTIFY → Senyal luminoso/acústic per localitzar
 
-# Bales
-BTN_BIG       = 5   # Bala gran (large_slow)
-BTN_MED       = 6   # Bala mitjana (medium)
-BTN_SMALL     = 7   # Bala petita (small_fast)
+BTN_BIG      = 5   # Bala gran   → shoot(pid, "large_slow")
+BTN_MED      = 6   # Bala mitjana→ shoot(pid, "medium")
+BTN_SMALL    = 7   # Bala petita → shoot(pid, "small_fast")
 
-BTN_ARMAR     = 8   # Arm
-BTN_DESPEGAR  = 9   # Take-off 5 m
+BTN_ARMAR    = 8   # ARM     → Armar motors (dron.arm())
+BTN_DESPEGAR = 9   # TAKEOFF → Enlairar a 5 m (dron.takeoff(5))
 
-DEADZONE  = 0.05     # Si el valor del eje está dentro de ±0.05, lo tratamos como 0. Así ignoramos pequeños ruidos
-STEP_GPS  = 5e-5     # latitud/longitud por cada unidad de stick (±1). Un valor muy pequeño para movimientos finos
-STEP_ALT  = 0.10     # Incremento de altitud por unidad de stick
-STEP_YAW  = 4        # Incremento de heading (grados) por unidad de stick
+STEP_ALT = 0.20    # desplazamiento altitud por iteración
+STEP_YAW  = 4
+MAX_ALT = 5           # altura de juego (= techo)
+STEP_GPS_APP  = 2e-4
+
+DEADZONE        = 0.1          #  ±10 %
+MAX_SPEED       = 0.5          # velocidad
+THROTTLE_PERIOD = 0.05          # 5000 ms entre comandos
+
+STEP_GPS  = 2e-4 * MAX_SPEED   # desplazamiento horizontal
+STEP_ALT  = 0.20 * MAX_SPEED   # desplazamiento vertical
+STEP_YAW  = 4    * MAX_SPEED   # giro
 
 def _dz(v: float) -> float:
     return v if abs(v) >= DEADZONE else 0.0
@@ -139,14 +173,44 @@ def _ready(dron) -> bool:
 def _identify(d):
     print(f"[{d}] identify")
 
-def _arm(d):       d.arm()
-def _takeoff(d):   d.takeOff(5, blocking=False)
+def _arm(d):
+    d.setFlightMode('GUIDED')   # antes  de armar
+    time.sleep(0.1)
+    d.arm()
 def _rtl(d):       d.setFlightMode('RTL')
 def _loiter(d):    d.setFlightMode('LOITER')
 def _guided(d):    d.setFlightMode('GUIDED')
 
+def _takeoff(d: Dron) -> None:
 
-def joystick_loop():
+    if d.state == "flying" and d.alt >= 4.0:
+        #  Ya esta a 5 m, ignoramos el botón
+        return
+
+    d.setFlightMode('GUIDED')
+
+    if d.state not in ("armed", "takingOff", "flying"):
+        d.arm()
+        time.sleep(1)
+
+    # takeOff a 5 m
+    d.takeOff(5, blocking=False)
+    players[d.id]['status'] = 'active'
+
+    #  altitud objetivo
+    d.goto(d.lat, d.lon, 5)
+
+
+def _land(d):
+    try:
+        d.Land(blocking=False)
+    except AttributeError:
+        d.setFlightMode('LAND')
+
+MIN_ALT = 0.2
+
+def joystick_loop() -> None:
+    global match_started
     clock = pygame.time.Clock()
 
     while True:
@@ -158,17 +222,26 @@ def joystick_loop():
                 continue
             dron = swarm[drone_id]
 
-            #  botones “fijos”
+            now = time.time()
+            last = _last_cmd_ts.get(jid, 0.0)
+            if now - last < THROTTLE_PERIOD:
+                continue
+            _last_cmd_ts[jid] = now
+
+            for i in range(joy.get_numbuttons()):
+                if joy.get_button(i):
+                    print(f"[JOY {jid}]  ha pulsado el botón  #{i}")
+
             button_actions = {
                 BTN_IDENTIFY: lambda d=dron: _identify(d) if _ready(d) else None,
-                BTN_ARMAR: lambda d=dron: _arm(d) if _ready(d) else None,
-                BTN_DESPEGAR: lambda d=dron: _takeoff(d) if _ready(d) else None,
-                BTN_RTL: lambda d=dron: _rtl(d) if _ready(d) else None,
-                BTN_LOITER: lambda d=dron: _loiter(d) if _ready(d) else None,
-                BTN_GUIDED: lambda d=dron: _guided(d) if _ready(d) else None,
+                BTN_ARMAR   : lambda d=dron: _arm(d)      if _ready(d) else None,
+                BTN_DESPEGAR: lambda d=dron: _takeoff(d)  if _ready(d) else None,
+                BTN_RTL     : lambda d=dron: _rtl(d)      if _ready(d) else None,
+               # BTN_LOITER  : lambda d=dron: _loiter(d)   if _ready(d) else None,
+                BTN_GUIDED  : lambda d=dron: _guided(d)   if _ready(d) else None,
+                BTN_LAND: lambda d=dron: _land(d) if _ready(d) and (
+                            match_started or players[drone_id]['status'] != 'active') else None,
             }
-
-            #  disparos sólo si bullets_enabled
             if bullets_enabled:
                 button_actions.update({
                     BTN_BIG  : lambda: shoot(drone_id, "large_slow"),
@@ -176,64 +249,80 @@ def joystick_loop():
                     BTN_SMALL: lambda: shoot(drone_id, "small_fast"),
                 })
 
-            # detectamos flanco
+            # flancos de botón
             for b in range(joy.get_numbuttons()):
-                if joy.get_button(b) and not _prev_btns[jid][b]:
-                    act = button_actions.get(b)
-                    if act: act()
-                _prev_btns[jid][b] = joy.get_button(b)
+                pressed = joy.get_button(b)
+                if pressed and not _prev_btns[jid][b]:
+                    action = button_actions.get(b)
+                    if action:
+                        action()
+                _prev_btns[jid][b] = pressed
 
-            # sticks (yaw/throttle & roll/pitch)
-            lh, lv = _dz(joy.get_axis(AX_L_H)), _dz(joy.get_axis(AX_L_V))
-            rh, rv = _dz(joy.get_axis(AX_R_H)), _dz(joy.get_axis(AX_R_V))
+            lh_raw, lv_raw = joy.get_axis(AX_L_H), joy.get_axis(AX_L_V)   # stick izquierdo
+            rh_raw, rv_raw = joy.get_axis(AX_R_H), joy.get_axis(AX_R_V)   # stick derecho
 
-            if rh or rv:
-                mover_dron(dron,
-                           (dron.lat + (-rv)*STEP_GPS,
-                            dron.lon +   rh *STEP_GPS),
-                           player_id=drone_id)
+            #  ROLL / PITCH  (stick derecho)
+            mag_r = math.hypot(rh_raw, rv_raw)
+            if mag_r >= DEADZONE:
+                nx, ny = rh_raw / mag_r, rv_raw / mag_r
+                f = ((mag_r - DEADZONE) / (1 - DEADZONE)) * MAX_SPEED
+                mover_dron(
+                    dron,
+                    (dron.lat + (-ny) * STEP_GPS * f,
+                     dron.lon +   nx  * STEP_GPS * f),
+                    player_id=drone_id
+                )
 
-            if lv:
-                dron.goto(dron.lat, dron.lon,
-                          max(0, dron.alt + (-lv)*STEP_ALT))
+            #  THROTTLE + YAW  (stick izquierdo)
+            mag_l = math.hypot(lh_raw, lv_raw)
+            # print(f"Axes L: {lh_raw:.2f},{lv_raw:.2f}  R: {rh_raw:.2f},{rv_raw:.2f}  magR={mag_r:.2f}")
 
-            if lh:
-                _set_yaw(dron, (dron.heading + lh*STEP_YAW) % 360)
+            if mag_l >= DEADZONE:
+                nx, ny = lh_raw / mag_l, lv_raw / mag_l
+                f = ((mag_l - DEADZONE) / (1 - DEADZONE)) * MAX_SPEED
 
-        clock.tick(40)
+                # THROTTLE (altitud)
+                if abs(ny) > 0:
+                    target_alt = dron.alt + (-ny) * STEP_ALT * f
+                    target_alt = max(MIN_ALT, min(MAX_ALT, target_alt))
+                    dron.goto(dron.lat, dron.lon, target_alt)
+
+                # YAW (giro)
+                if abs(nx) > 0:
+                    _set_yaw(dron, (dron.heading + nx * STEP_YAW * f) % 360)
+
+        clock.tick(60)
 
 if num_joys:
     threading.Thread(target=joystick_loop, daemon=True).start()
 else:
     print("Jugando sin joystick (flechas, espacio o la app móvil).")
 
+session_id = None
 
-def choose_environment() -> str:
-    root = tk.Tk(); root.withdraw()
-    ans = messagebox.askquestion(
-        title="Entorn",
-        message="Local (YES) o Producció (NO)?",
-        icon="question",
-        type="yesno"
-    )
-    root.destroy()
-    return "local" if ans == "yes" else "prod"
-
-ENV = choose_environment() # 'local' / 'prod'
+ENV = "local"
+print(f"[INFO] Entorn fixat a {ENV.upper()}")
 
 # carreguem el fitxer adequat
-env_file = ".env.local" if ENV == "local" else ".env.prod"
+env_file = ".env" if ENV == "local" else ".env.prod"
 if not load_dotenv(env_file, override=True):
     sys.exit(f"No s'ha trobat {env_file}")
 
-# variables Globals
-BASE_URL   = os.getenv("SERVER_URL", "http://localhost:9000").rstrip("/")
-VERIFY_SSL = os.getenv("VERIFY_SSL", "true").lower() == "true"
+# Carrega automàticament el .env que estigui en la ruta del projecte
+load_dotenv(find_dotenv())
+
+# Ara ja tens totes les variables del .env en os.environ
+BASE_URL = os.getenv("SERVER_URL")    # No cal posar fallback
+IS_HTTPS = BASE_URL.startswith("https")
+print(f"[INFO] Entorn → {BASE_URL}")
+
+# http://localhost:9000
+# https://ea2-api.upc.edu/
+
 IS_HTTPS   = BASE_URL.startswith("https")
 print(f"[INFO] {ENV.upper()}  →  {BASE_URL}")
 
-
-API_URL  = f"{BASE_URL}/api"
+API_URL = f"{BASE_URL}/api"
 
 ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 if not ADMIN_KEY:
@@ -250,21 +339,51 @@ def email_of_id(id):          # 0-3 → dron_rojo1@upc.edu …
 
 
 def login(email: str, password: str) -> str:
-    r = requests.post(
-        f"{API_URL}/auth/login",
-        json={"email": email, "password": password},
-        verify=VERIFY_SSL          # True si és https, False si és http
-    )
-    r.raise_for_status()
+    r = requests.post(f"{API_URL}/auth/login",
+                      json={"email": email, "password": password})
+    if r.status_code != 200:
+        print("Login failed:", r.status_code, r.text)
+        r.raise_for_status()
     return r.json()["accesstoken"]
 
-
-# --- crea un cliente socket para el profesor ---
+#  cliente socket para el profesor
 sio_prof = socketio.Client(
     logger=False,
-    engineio_logger=False,
-    ssl_verify=VERIFY_SSL
+    engineio_logger=False
 )
+
+
+if not hasattr(socketio.Client, "connection_state"):
+    def _conn_state(self, ns="/"):
+        return "connected" if (self.connected and ns in self.namespaces) \
+                            else "disconnected"
+    socketio.Client.connection_state = _conn_state
+
+
+def _ns_connected(sio: socketio.Client, ns: str = "/"):
+    """Devuelve True si el namespace está realmente conectado,
+       sea cual sea la versión de python-socketio que se use."""
+    return sio.connection_state(ns) == "connected"
+
+
+def wait_until_connected(sio, ns="/jocs", timeout=5.0):
+    t0 = time.time()
+    while not _ns_connected(sio, ns):
+        if time.time() - t0 > timeout:
+            raise RuntimeError(f"Timeout esperando conexión a {ns}")
+        time.sleep(0.05)
+
+
+def safe_emit(sio, event, data, namespace="/jocs",
+              retries=40, delay=0.25):
+    for _ in range(retries):
+        if _ns_connected(sio, namespace):
+            sio.emit(event, data, namespace=namespace)
+            return True
+        time.sleep(delay)          # esperamos a que se restablezca
+    print(f"[WARN] emit «{event}» descartado tras {retries} intentos")
+    return False
+
 
 @sio_prof.event(namespace='/professor')
 def connect():
@@ -276,8 +395,7 @@ def connect_error(data):
 
 try:
     sio_prof.connect(
-        BASE_URL,                      # http → ws   |   https → wss
-        transports=["websocket"],
+        BASE_URL,
         namespaces=["/professor"],
         auth={"/professor": {"key": ADMIN_KEY}}
     )
@@ -286,20 +404,36 @@ except Exception as e:
     sys.exit(1)
 
 
-def make_dron_client(color, token):
+def make_dron_client(color: str, token: str):
     sio = socketio.Client(
         logger=False,
         engineio_logger=False,
-        ssl_verify=VERIFY_SSL
+        reconnection=True,
+        reconnection_delay=2,
+        reconnection_delay_max=10,
+        reconnection_attempts=0
     )
 
     @sio.event(namespace='/jocs')
+    def disconnect():
+        print(f"[{color}] >>> disconnect (reason={sio.eio.state})")
+
+    def _join_room():
+        if session_id:
+            sio.emit('join', {'sessionId': session_id}, namespace='/jocs')
+
+    @sio.event(namespace='/jocs')
     def connect():
-        print(f"🔌 Dron {color} conectado a /jocs")
+        print(f"[{color}] conectado  id={sio.sid}")
+        _join_room()              # 1ª vez
+
+    @sio.event(namespace='/jocs')
+    def reconnect():
+        print(f"[{color}] RE-conectado  id={sio.sid}")
+        _join_room()              # cada re-conexión
 
     @sio.on('state_update', namespace='/jocs')
     def on_state_update(data):
-        # data = { drone: "...", action, payload, by }
         if data.get('drone') != os.getenv(f"DRON_{color.upper()}_EMAIL"):
             return
         action  = data['action']
@@ -309,8 +443,8 @@ def make_dron_client(color, token):
         if action == 'move':
             dx, dy = payload['dx'], payload['dy']
             lat, lon = positions[color]
-            new_lat = lat + dy * 0.00005
-            new_lon = lon + dx * 0.00005
+            new_lat = lat + dy * STEP_GPS_APP
+            new_lon = lon + dx * STEP_GPS_APP
             positions[color] = (new_lat, new_lon)
             mover_dron(swarm[pid], (new_lat, new_lon), player_id=pid)
         elif action == 'fire':
@@ -320,7 +454,6 @@ def make_dron_client(color, token):
     # Conectamos
     sio.connect(
         BASE_URL,
-        transports=["websocket"],
         namespaces=["/jocs"],
         auth={"token": token}
     )
@@ -337,7 +470,7 @@ dron_clients = {}
 
 for color, (email, pwd) in DRONS.items():
     if not email or not pwd:
-        print(f"Falta email/password para dron {color} en .env.local")
+        print(f"Falta email/password para dron {color} en .env")
         sys.exit(1)
     token = login(email, pwd)
     dron_clients[color] = make_dron_client(color, token)
@@ -376,14 +509,6 @@ def on_control(data):
 
     else:
         print(f"unknown action {action}")
-
-
-
-_removed_bboxes: set[tuple[float,float,float,float]] = set()
-_destroyed_obstacles: set[int] = set()   # guarda id() de cada obstáculo ya eliminado
-_lock_obstacles       = threading.Lock() # evita condiciones de carrera
-
-
 
 
 def haversine(lat1, lon1, lat2, lon2):
@@ -972,15 +1097,8 @@ def scenario_to_polygons(scn: list[dict]) -> list[list[tuple[float, float]]]:
 
 
 
-# ------------------------------------------------------------------ helpers --
 def _param_set(mav, name: str, value, ptype):
-    """
-    Envía un PARAM_SET y espera (opcional) la confirmación.
-    mav ............. conexión mavutil (tcp, serial…)
-    name ............ nombre del parámetro (str)
-    value ........... valor (int o float)
-    ptype ........... mavutil.mavlink.MAV_PARAM_TYPE_*
-    """
+
     mav.mav.param_set_send(
         mav.target_system,
         mav.target_component,
@@ -991,40 +1109,28 @@ def _param_set(mav, name: str, value, ptype):
     # esperamos 2 s el PARAM_VALUE de eco (sin filtrar por param_id)
     mav.recv_match(type='PARAM_VALUE', blocking=True, timeout=2)
 
-# ----------------------------------------------------------- geofence params --
 def setup_fence_params(dron):
     m = dron.vehicle  # conexión mavutil
 
     try:
-        _param_set(m, 'FENCE_ENABLE', 1, mavutil.mavlink.MAV_PARAM_TYPE_INT32)  # valla ON
+        _param_set(m, 'FENCE_ENABLE', 1, mavutil.mavlink.MAV_PARAM_TYPE_INT32)  # activar valla
         _param_set(m, 'FENCE_TYPE', 3, mavutil.mavlink.MAV_PARAM_TYPE_INT32)  # 3 = polígono
-        _param_set(m, 'FENCE_ACTION', 1, mavutil.mavlink.MAV_PARAM_TYPE_INT32)  # 1 = RTL
-        _param_set(m, 'FENCE_ALT_MAX', 120, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)  # techo
+        _param_set(m, 'FENCE_ACTION', 2, mavutil.mavlink.MAV_PARAM_TYPE_INT32)  # 2 = LAND
+        _param_set(m, 'FENCE_ALT_MAX', 5, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)  # techo 5 m
+        _param_set(m, 'FENCE_MARGIN', 0.5, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)  # margen 0.5 m
 
-        # ➜ nuevo parámetro:
-        _param_set(m, 'FENCE_MARGIN', 5, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)  # 5 m
 
         print(f"[{dron}] parámetros FENCE_* enviados")
     except Exception as e:
         print(f"[{dron}] setup_fence_params: {e}")
 
-
-# ------------------------------------------------------------ subir polígonos --
-# --- NUEVA VERSIÓN upload_fence_to_fc -------------------------------
 def upload_fence_to_fc(dron, polygons):
-    """
-    polygons  ->  [ [(lat,lon),…] ,  # 1º = inclusión
-                    [(lat,lon),…] ,  # 2º = exclusión
-                    … ]
-    """
     m = dron.vehicle
     total = sum(len(p) for p in polygons)
 
-    # (1) fijar número total de vértices
     _param_set(m, 'FENCE_TOTAL', total,
                mavutil.mavlink.MAV_PARAM_TYPE_INT32)
 
-    # (2) enviar cada polígono por separado
     for poly in polygons:
         cnt = len(poly)
         for idx, (lat, lon) in enumerate(poly):
@@ -1039,7 +1145,6 @@ def upload_fence_to_fc(dron, polygons):
             time.sleep(0.05) # aligera el tráfico MAVLink
 
 
-
 def load_first_competition(n_players: int):
     patron = os.path.join("competencia", f"*_{n_players}.json")
     archivos = glob.glob(patron)
@@ -1052,10 +1157,11 @@ def load_first_competition(n_players: int):
 def sendCircuit():
     global swarm, scenario, selectedMultiScenario, numPlayers, obstacles
 
+
     if not scenario and not selectedMultiScenario:
         selectedMultiScenario = load_first_competition(numPlayers)
 
-    if selectedMultiScenario:                         # === multi-escenario ===
+    if selectedMultiScenario:
         scenarios = selectedMultiScenario.get('scenarios', [])
         if len(scenarios) < len(swarm):
             messagebox.showerror("Error",
@@ -1279,30 +1385,30 @@ def punto_dentro_poligono(point, polygon):
 
 
 def mover_dron(dron, nueva_pos, player_id=None):
-    # ──────────── 1) si encara no hi ha llista de jugadors ─────────────
-    if player_id is None or player_id >= len(players):
-        # Encara estem abans de startGame → permetem moviment lliure
-        dron.goto(nueva_pos[0], nueva_pos[1], 5)
+    if dron.alt <= MIN_ALT:
         return
 
-    # ──────────── 2) estat del jugador (després de startGame) ──────────
+    #  antes de startGame se permite
+    if player_id is None or player_id >= len(players):
+        dron.goto(nueva_pos[0], nueva_pos[1], dron.alt)
+        return
+
+    # eliminado / respawn
     if players[player_id]['status'] != 'active':
         print(f"El dron {player_id} està en estat {players[player_id]['status']} i no pot moure’s.")
         return
 
-    # ──────────── 3) col·lisions o fugides ─────────────────────────────
-    if scenario_ready:                      # <─ només quan ja hi ha geofence
-        if verificar_colision(nueva_pos, player_id):
-            print(f"Jugador {player_id} intenta passar per un obstacle. Tornant a la posició anterior.")
-            if player_id in last_valid_positions:
-                prev_pos = last_valid_positions[player_id]
-                dron.goto(prev_pos[0], prev_pos[1], 5)
-            return
+    # colisiones
+    if scenario_ready and verificar_colision(nueva_pos, player_id):
+        print(f"Jugador {player_id} intenta passar per un obstacle. Tornant a la posició anterior.")
+        if player_id in last_valid_positions:
+            prev_lat, prev_lon = last_valid_positions[player_id]
+            dron.goto(prev_lat, prev_lon, dron.alt)
+        return
 
-    # ──────────── 4) moviment acceptat ─────────────────────────────────
-    dron.goto(nueva_pos[0], nueva_pos[1], 5)
+    # movimiento aceptado
+    dron.goto(nueva_pos[0], nueva_pos[1], dron.alt)  # mantiene Z
     last_valid_positions[player_id] = nueva_pos
-
 
 
 #Devuelve el obstáculo en 'pos' si 'pos' está dentro de su polígono, o None si no hay obstáculo ahí
@@ -1340,6 +1446,22 @@ def verificar_colision(pos, player_id=None):
                     return True
 
     return False
+
+
+def esquivar_obstaculo(dron, nueva_pos):
+    # Lógica simple para esquivar obstáculos: intentar moverse en una dirección ligeramente diferente
+    delta = 0.0001  # Pequeño cambio en la posición
+    alternativas = [
+        (nueva_pos[0] + delta, nueva_pos[1]),
+        (nueva_pos[0] - delta, nueva_pos[1]),
+        (nueva_pos[0], nueva_pos[1] + delta),
+        (nueva_pos[0], nueva_pos[1] - delta)
+    ]
+    for alt_pos in alternativas:
+        if not verificar_colision(alt_pos):
+            dron.go_to(alt_pos)
+            return
+    print("No se encontró una ruta alternativa.")
 
 
 def eliminar_obstaculo(coords):
@@ -1744,6 +1866,47 @@ def get_bounding_box(waypoints):
         'max_lon': max(lons)
     }
 
+
+def mirror_and_rotate_obstacle_shapely(obstacle, base_fence, target_fence, angle_deg=60):
+    base_bbox   = get_bounding_box(base_fence['waypoints'])
+    target_bbox = get_bounding_box(target_fence['waypoints'])
+
+    # Construir la lista de waypoints del obstáculo
+    obs_wps = obstacle['waypoints']  # [{'lat':..., 'lon':...}, ...]
+
+    mirrored_coords = []
+    for wp in obs_wps:
+        lat = wp['lat']
+        lon = wp['lon']
+
+        rel_lat = (lat - base_bbox['min_lat']) / (base_bbox['max_lat'] - base_bbox['min_lat'] + 1e-12)
+        rel_lon = (lon - base_bbox['min_lon']) / (base_bbox['max_lon'] - base_bbox['min_lon'] + 1e-12)
+
+        new_lat = target_bbox['min_lat'] + rel_lat * (target_bbox['max_lat'] - target_bbox['min_lat'])
+        new_lon = target_bbox['max_lon'] - rel_lon * (target_bbox['max_lon'] - target_bbox['min_lon'])
+
+        mirrored_coords.append( (new_lon, new_lat) )  # en shapely: (x, y)=(lon, lat)
+
+    # Crear polígono shapely a partir de mirrored_coords
+    poly_mirrored = Polygon(mirrored_coords)
+
+    # Rotar -20°
+    rotated_poly = rotate(poly_mirrored, angle_deg, origin='centroid', use_radians=False)
+
+    # Extraer las coords finales en formato lat/lon
+    final_waypoints = []
+    for (x, y) in rotated_poly.exterior.coords:
+        final_waypoints.append({'lat': y, 'lon': x})
+
+    # Construir el nuevo obstáculo
+    new_obstacle = {
+        'type': 'polygon',
+        'waypoints': final_waypoints,
+        'altitude': obstacle.get('altitude', 5)
+    }
+    return new_obstacle
+
+
 def calcular_centro(waypoints):
     lat_sum = sum(p['lat'] for p in waypoints)
     lon_sum = sum(p['lon'] for p in waypoints)
@@ -2031,6 +2194,7 @@ def crear_ventana():
     global bullet_small_image, bullet_medium_image, bullet_large_image
     global timeBtn, plotBtn, statsBtn
 
+    playersCount = 0
     connected = False
 
     # aqui indicare, para cada dron, si estamos pintando o no
@@ -2642,15 +2806,31 @@ def shoot(player_id: int, bullet_type: str) -> None:
         'large_slow': bullet_large_image
     }.get(bullet_type, bullet_medium_image)
 
-    marker   = map_widget.set_marker(start_pos[0], start_pos[1],
-                                     icon=bullet_icon, icon_anchor="center")
+    marker   = map_widget.set_marker(start_pos[0], start_pos[1],icon=bullet_icon, icon_anchor="center")
     step     = bullet_info['speed'] / 10_000_000
     radius_m = bullet_info['radius']
 
-    threading.Thread(target=move_bullet,
-                     args=(marker, start_pos, heading, step,
-                           player_id, radius_m),
-                     daemon=True).start()
+    threading.Thread(target=move_bullet, args=(marker, start_pos, heading, step, player_id, radius_m), daemon=True).start()
+
+
+def eliminateDrone(drone_id):
+    global eliminated_players, survival_mode
+
+    # Actualizar estado y aterrizar el dron
+    players[drone_id]['status'] = 'eliminated'
+    swarm[drone_id].Land(blocking=False)
+    eliminated_players.add(drone_id)
+
+    # Llamar a la función para actualizar el icono del dron a la versión de aterrizaje
+    # Se lanza en un thread para no bloquear la interfaz.
+    threading.Thread(target=update_drone_icon_on_landing, args=(drone_id,), daemon=True).start()
+
+    # Verificar si se debe terminar la partida
+    checkGameEnd()
+
+    # Si no es modo supervivencia, se respawnea el dron después de 10 segundos
+    if not survival_mode:
+        threading.Thread(target=respawnDrone, args=(drone_id,), daemon=True).start()
 
 
 def check_collision_with_drone(bullet_pos, shooter_id, threshold_meters=1):
@@ -2681,8 +2861,8 @@ def update_score(event_type: str, player_id: int):
 
     color = color_of_id(player_id)
     email = email_of_id(player_id)
-    dron_clients[color].emit(
-        'score',
+    safe_emit(
+    dron_clients[color], 'score',
         {
             'sessionId': session_id,
             'drone'    : email,
@@ -3042,10 +3222,12 @@ def cambiar_dron_activo():
 def mover_dron_teclado(direccion):
     global active_player_id, swarm
 
+    # Selecciona el dron que està sota control
     dron = swarm[active_player_id]
     lat, lon = dron.lat, dron.lon
-    paso = 0.00003  # Pequeño desplazamiento
+    paso = 0.00003  # Petit desplaçament
 
+    # Associa el paràmetre 'direccion' amb un desplaçament
     if direccion == "arriba":
         nueva_pos = (lat + paso, lon)
     elif direccion == "abajo":
@@ -3056,7 +3238,7 @@ def mover_dron_teclado(direccion):
         nueva_pos = (lat, lon + paso)
     else:
         return
-
+    # Envio la comanda de moviment, que inclou totes les comprovacions
     mover_dron(dron, nueva_pos, player_id=active_player_id)
 
 
@@ -3191,7 +3373,8 @@ def connect():
 
     if connectOption.get() == 'Simulation':
         connectionStrings = [
-            f'tcp:127.0.0.1:{5763 + i*10}' for i in range(numPlayers)
+            f'tcp:127.0.0.1:{5763 + i * 10}'
+            for i in range(numPlayers)
         ]
         baud = 115200
     else:
@@ -3294,17 +3477,21 @@ def startGame():
     global players, eliminated_players, recording_enabled
     global game_clock_label, game_timer_running, game_elapsed_seconds
     global session_id
-    bullets_enabled = True  # habilitamos disparos
+    global bullets_enabled
+    global match_started
+    match_started = True
 
-    # Fija siempre session_id = "1" sin preguntar
+    #  session_id = "1"
     if session_id is None:
         session_id = "1"
         print(f"[INFO] Usando sesión por defecto: {session_id}")
 
         # Todos los drones se unen a la sesión
         for color_key, client in dron_clients.items():
+            wait_until_connected(client)
             client.emit('join', {'sessionId': session_id}, namespace='/jocs')
 
+        bullets_enabled = True
         # Notifica al profesor que arranca la competición
         sio_prof.emit('startCompetition', {'sessionId': session_id}, namespace='/professor')
         print("startCompetition enviado")
@@ -3314,7 +3501,16 @@ def startGame():
 
     # Despegan solo los jugadores realmente inicializados
     for player in players:
-        swarm[player['id']].takeOff(5, blocking=False)
+        try:
+            d = swarm[player['id']]
+            d.setFlightMode('GUIDED')
+            d.arm()
+            time.sleep(1)
+            d.takeOff(5, blocking=False)
+
+        except Exception as exc:
+            print(f"[ERROR] takeOff para id={player['id']} → {exc}")
+            raise
 
     messagebox.showinfo("Inicio del Juego", "El juego ha comenzado!")
     startGameBtn['bg'] = 'green'
@@ -3357,7 +3553,7 @@ def startGame():
             print(f"[ERROR] Índice de color inválido: {idx}")
             continue
 
-        simple_color = color_keys[idx]  # p.ej. 'rojo'
+        simple_color = color_keys[idx]  # 'rojo'
         email = color_to_email[simple_color]  # mapeo anterior
 
         if idx >= len(scenarios):
@@ -3463,9 +3659,7 @@ def processTelemetryInfo(pid: int, info: dict):
         direction_lines[pid].delete()
     tip_lat  = nose_lat + 0.00090 * math.cos(math.radians(head))
     tip_lon  = nose_lon + 0.00090 * math.sin(math.radians(head))
-    direction_lines[pid] = map_widget.set_path([(nose_lat, nose_lon),
-                                                (tip_lat,  tip_lon)],
-                                               color="black", width=2)
+    direction_lines[pid] = map_widget.set_path([(nose_lat, nose_lon),(tip_lat,  tip_lon)],color="black", width=2)
 
     if pid < len(altitudes):
         altitudes[pid]['text'] = f"Alt: {alt:.1f} m"
@@ -3473,19 +3667,22 @@ def processTelemetryInfo(pid: int, info: dict):
 
     if recording_enabled:
         with lock:
-            traces[pid].append({'pos': pos,
-                                'alt': alt,
-                                'speed': gspd,
-                                'heading': head})
+            traces[pid].append({'pos': pos, 'alt': alt,'speed': gspd,'heading': head})
+
+        # Si és la primera posició registrada per aquest dron
         if pid not in initial_positions:
             initial_positions[pid] = pos
-            total_distances[pid]   = 0
+            total_distances[pid] = 0
+
+        # Calculem la distància respecte a l’última posició (si n’hi ha)
         prev = traces[pid][-2]['pos'] if len(traces[pid]) > 1 else pos
         total_distances[pid] += haversine_distance(prev, pos)
 
     color = color_of_id(pid)
+    positions[color] = (lat, lon)
     email = email_of_id(pid)
-    dron_clients[color].emit(
+    safe_emit(
+    dron_clients[color],
         'telemetry',
         {'sessionId': session_id,
          'drone'    : email,
@@ -3503,7 +3700,8 @@ def move_bullet(marker, start_pos, heading, step, shooter_id, radius_m):
     email     = email_of_id(shooter_id)
 
     # alta inicial en el frontend
-    dron_clients[color].emit(
+    safe_emit(
+    dron_clients[color],
         'bullet', {'sessionId': session_id, 'drone': email,
                    'bulletId': bullet_id, 'lat': lat, 'lon': lon,
                    'event': 'create'}, namespace='/jocs')
@@ -3517,14 +3715,14 @@ def move_bullet(marker, start_pos, heading, step, shooter_id, radius_m):
         lon += step * math.sin(math.radians(heading))
         marker.set_position(lat, lon)
 
-        dron_clients[color].emit(
+        safe_emit(
+            dron_clients[color],
             'bullet', {'sessionId': session_id, 'drone': email,
                        'bulletId': bullet_id, 'lat': lat, 'lon': lon,
                        'event': 'move'}, namespace='/jocs')
 
         pt = Point(lon, lat)
 
-        # — obstáculo —
         hit_obstacle = None
         for obs in obstacles:
             if get_bbox(obs) in _removed_bboxes:
@@ -3538,9 +3736,9 @@ def move_bullet(marker, start_pos, heading, step, shooter_id, radius_m):
             destroy_obstacle(hit_obstacle, shooter_id)
             update_score("obstacle", shooter_id)
 
-            # destruir bala y salir
             marker.delete()
-            dron_clients[color].emit(
+            safe_emit(
+            dron_clients[color],
                 'bullet', {'sessionId': session_id, 'drone': email,
                            'bulletId': bullet_id, 'event': 'destroy'},
                 namespace='/jocs')
@@ -3553,7 +3751,8 @@ def move_bullet(marker, start_pos, heading, step, shooter_id, radius_m):
             eliminateDrone(victim)
 
             marker.delete()
-            dron_clients[color].emit(
+            safe_emit(
+            dron_clients[color],
                 'bullet', {'sessionId': session_id, 'drone': email,
                            'bulletId': bullet_id, 'event': 'destroy'},
                 namespace='/jocs')
@@ -3562,7 +3761,6 @@ def move_bullet(marker, start_pos, heading, step, shooter_id, radius_m):
         time.sleep(0.01)
 
 
-# ---------- helper separado (sin cambios) ----------
 def _destroy_bullet(marker, bullet_id, color, email):
     try:
         marker.delete()
@@ -3570,7 +3768,8 @@ def _destroy_bullet(marker, bullet_id, color, email):
         pass
     active_bullets[:] = [m for m in active_bullets if m is not marker]
 
-    dron_clients[color].emit(
+    safe_emit(
+    dron_clients[color],
         'bullet',
         {'sessionId': session_id, 'drone': email,
          'bulletId': bullet_id, 'event': 'destroy'},
@@ -3578,48 +3777,75 @@ def _destroy_bullet(marker, bullet_id, color, email):
     )
 
 
+def _check_hit_obstacle(point, deg_buf, shooter_id):
+    """Devuelve el obstáculo impactado (o None).  Marca instantáneamente
+       como destruido para el resto de hilos."""
+    with _lock_obstacles:
+        for obs in list(obstacles):
+            oid = id(obs)
+            if oid in _destroyed_obstacles:
+                continue
+            if obs.get('type') != 'polygon':
+                continue
+            poly = Polygon([(wp['lon'], wp['lat']) for wp in obs['waypoints']])
+            if poly.buffer(deg_buf).contains(point):
+                _destroyed_obstacles.add(oid)
+                return obs
+    return None
+
+
+def _tk_safe(fn, *args, **kwargs):
+    ventana.after(0, lambda: fn(*args, **kwargs))
+
+
 def destroy_obstacle(obstacle: dict, remover_id: int = 0) -> None:
     global obstacles, polys, selectedMultiScenario, _removed_bboxes
 
-    bbox = get_bbox(obstacle)              # (minx, miny, maxx, maxy)
-    _removed_bboxes.add(bbox)              # ← lo marcamos como destruido
+    bbox = get_bbox(obstacle)
+    _removed_bboxes.add(bbox)
 
-    # borrar TODOS los polígonos idénticos del mapa
+    # s'elimina l'obstacle del mapa
     for poly in polys[:]:
+        if not hasattr(poly, "position_list"):
+            continue
         try:
-            if get_bbox({
+            # comprova si l'àrea del polígon coincideix amb el de l'obstacle a eliminar
+            same = get_bbox({
                 'type': 'polygon',
                 'waypoints': [{'lat': p[0], 'lon': p[1]} for p in poly.position_list]
-            }) == bbox:
-                poly.delete()
+            }) == bbox
+            if same:
+                _tk_safe(poly.delete)
                 polys.remove(poly)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[destroy_obstacle] {e}")
 
-    # borrar TODAS las copias de la lista obstacles
+    # s'elimina l'estat intern del obstacle
     obstacles[:] = [obs for obs in obstacles if get_bbox(obs) != bbox]
 
-    # idem dentro del escenario cargado
     for scn in selectedMultiScenario.get('scenarios', []):
-        scn['scenario'][:] = [obs for obs in scn['scenario'] if get_bbox(obs) != bbox]
+        scn['scenario'][:] = [
+            obs for obs in scn['scenario'] if get_bbox(obs) != bbox
+        ]
 
+    #  Subir nuevo geofence a cada dron
     for i, dron in enumerate(swarm):
-        # ‘scenario’ del jugador i SIN el obstáculo eliminado
         scn = selectedMultiScenario['scenarios'][i]['scenario']
-        polys = scenario_to_polygons(scn)
-        upload_fence_to_fc(dron, polys)
+        new_polys = scenario_to_polygons(scn)
+        upload_fence_to_fc(dron, new_polys)
 
-    # avisar por websocket (una sola vez basta)
+    #  Avisar por WebSocket
     color = color_of_id(remover_id)
     email = email_of_id(remover_id)
-    dron_clients[color].emit(
+    safe_emit(
+        dron_clients[color],
         'obstacle',
         {
             'sessionId': session_id,
-            'drone':     email,
-            'type':      obstacle['type'],
-            'geometry':  obstacle['waypoints'],
-            'event':     'remove'
+            'drone': email,
+            'type': obstacle['type'],
+            'geometry': obstacle['waypoints'],
+            'event': 'remove'
         },
         namespace='/jocs'
     )
@@ -3680,7 +3906,8 @@ def colocar_obstaculo(coords, placer_id: int = 0):
     # notificamos por websocket
     color = color_of_id(placer_id)
     email = email_of_id(placer_id)
-    dron_clients[color].emit(
+    safe_emit(
+    dron_clients[color],
         'obstacle',
         {
             'sessionId': session_id,
@@ -3701,10 +3928,10 @@ def eliminateDrone(drone_id: int) -> None:
     threading.Thread(target=update_drone_icon_on_landing,
                      args=(drone_id,), daemon=True).start()
 
-    # avisamos a todos
     color = color_of_id(drone_id)
     email = email_of_id(drone_id)
-    dron_clients[color].emit(
+    safe_emit(
+    dron_clients[color],
         'drone_state',
         {'sessionId': session_id, 'drone': email, 'state': 'landed'},
         namespace='/jocs')
@@ -3714,6 +3941,9 @@ def eliminateDrone(drone_id: int) -> None:
     else:
         threading.Thread(target=respawnDrone, args=(drone_id,), daemon=True).start()
 
+
+RESPAWN_SECS = 10
+_last_death_ts = {}
 
 def respawnDrone(drone_id: int) -> None:
     time.sleep(RESPAWN_SECS)
@@ -3726,7 +3956,8 @@ def respawnDrone(drone_id: int) -> None:
 
     color = color_of_id(drone_id)
     email = email_of_id(drone_id)
-    dron_clients[color].emit(
+    safe_emit(
+    dron_clients[color],
         'drone_state',
         {'sessionId': session_id, 'drone': email, 'state': 'flying'},
         namespace='/jocs')

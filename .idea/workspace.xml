@@ -5,11 +5,18 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="1da3c4dc-7240-4b2b-a745-1fcafd148539" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/qr.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.env" beforeDir="false" afterPath="$PROJECT_DIR$/.env" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.env.prod" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/competenciaConMobileReal.py" beforeDir="false" afterPath="$PROJECT_DIR$/competenciaConMobileReal.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/competenciaConMobileReal_PROVA1.py" beforeDir="false" afterPath="$PROJECT_DIR$/competenciaConMobileReal_PROVA1.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/competenciaConMobile.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/competenciaConMobileReal.py" beforeDir="false" afterPath="$PROJECT_DIR$/combatSinMobile.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/competenciaConMobileReal_PROVA.py" beforeDir="false" afterPath="$PROJECT_DIR$/competenciaConMobileReal_PROVA.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/competenciaConMobileReal_PROVA1.py" beforeDir="false" afterPath="$PROJECT_DIR$/combatConMobile.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/competenciaConMobileSimulación.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/competenciaConMobile_prova.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/competenciaSinMobile.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/competenciaSinMobile_prova.py" beforeDir="false" afterPath="$PROJECT_DIR$/competenciaSinMobile_prova.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -34,6 +41,7 @@
   <component name="PropertiesComponent"><![CDATA[{
   "keyToString": {
     "Python.AutopilotControllerClass.executor": "Run",
+    "Python.combatSinMobile.executor": "Run",
     "Python.competenciaConMobile.executor": "Run",
     "Python.competenciaConMobileReal.executor": "Run",
     "Python.competenciaConMobileReal_PROVA.executor": "Run",
@@ -57,7 +65,7 @@
     "RunOnceActivity.git.unshallow": "true",
     "git-widget-placeholder": "main",
     "last_opened_file_path": "C:/Users/LENOVO/Desktop/EETAC/TFG/2. Codig/multidronBoard",
-    "settings.editor.selected.configurable": "preferences.editor"
+    "settings.editor.selected.configurable": "preferences.lookFeel"
   }
 }]]></component>
   <component name="RecentsManager">
